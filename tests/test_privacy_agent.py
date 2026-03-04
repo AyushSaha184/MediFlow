@@ -48,7 +48,7 @@ def privacy_agent(privacy_service: PrivacyService) -> PrivacyProtectionAgent:
 # ------------------------------------------------------------------------------
 
 def test_privacy_service_scrubs_text(privacy_service: PrivacyService):
-    """Test the raw text anonymiser against common PII targets."""
+    """Test the raw text anonymiser against common PII targets and custom Medical IDs."""
     dirty_text = (
         "Patient Jane Smith (DOB 1985) is seen today. "
         "Her phone number is 555-0199 and her email is jane.smith@example.com. "
@@ -56,13 +56,16 @@ def test_privacy_service_scrubs_text(privacy_service: PrivacyService):
     )
     # The SSN won't trigger if masked, let's use a full fake one to test SSN logic
     # Presidio US_SSN recogniser prefers standard 9 digit with dashes context
+    # Also testing our custom MEDICAL_ID (MRN) and prefix-based PERSON (Pt: J Doe)
     dirty_text_full = (
-        "Patient John Doe. Contact: 123-456-7890. Email: john@doe.com. My Social is 234-56-7890."
+        "Pt: J Doe. Contact: 123-456-7890. Email: john@doe.com. My Social is 234-56-7890. "
+        "MRN: 987654321. Patient ID: A-1234. Case No: 555."
     )
     
     clean_text = privacy_service.anonymize_text(dirty_text_full)
     
-    assert "John Doe" not in clean_text
+    # Check default Presidio and custom prefix name detection
+    assert "J Doe" not in clean_text
     assert "<PERSON>" in clean_text
     
     assert "123-456-7890" not in clean_text
@@ -74,9 +77,15 @@ def test_privacy_service_scrubs_text(privacy_service: PrivacyService):
     assert "234-56-7890" not in clean_text
     assert "<US_SSN>" in clean_text
 
+    # Check custom Medical IDs
+    assert "987654321" not in clean_text
+    assert "A-1234" not in clean_text
+    assert "555" not in clean_text
+    assert "<MEDICAL_ID>" in clean_text
+
 
 def test_privacy_service_scrubs_metadata(privacy_service: PrivacyService):
-    """Deeply nested metadata dictionaries must also be scrubbed."""
+    """Deeply nested metadata dictionaries must also be scrubbed, except safe DICOM keys."""
     dirty_meta = {
         # 'john_doe_report.pdf' is hard for off-the-shelf NER to catch as a PERSON usually.
         # So we test a more realistic metadata field like author or explicit patient name.
@@ -84,8 +93,12 @@ def test_privacy_service_scrubs_metadata(privacy_service: PrivacyService):
         "nested": {
             "referring_physician": "Dr. Lisa Cuddy",
             "contact": "Call 987-654-3210 for details",
+            "PatientID": "PX-9999", # Should be scrubbed via generic string search if we had a recognizer for it, or we rely on explicit safe keys
         },
-        "tags": ["urgent", "patient: James Wilson"]
+        "tags": ["urgent", "patient: James Wilson", "MRN: 112233"],
+        # DICOM specific safe keys
+        "StudyDate": "20231024",
+        "Modality": "CT"
     }
     
     clean_meta = privacy_service.anonymize_metadata(dirty_meta)
@@ -94,6 +107,11 @@ def test_privacy_service_scrubs_metadata(privacy_service: PrivacyService):
     assert "Lisa Cuddy" not in clean_meta["nested"]["referring_physician"]
     assert "987-654-3210" not in clean_meta["nested"]["contact"]
     assert "James Wilson" not in clean_meta["tags"][1]
+    assert "112233" not in clean_meta["tags"][2]
+    
+    # Verify safe keys are untouched
+    assert clean_meta["StudyDate"] == "20231024"
+    assert clean_meta["Modality"] == "CT"
     
     # Structure remains identical
     assert isinstance(clean_meta["nested"], dict)
@@ -124,12 +142,14 @@ async def test_privacy_agent_cleans_staged_pdf(
         "Patient Alice Wonderland walked in complaining of headache.\n"
         "Callback num: 555-867-5309"
     )
+    # We need a proper capitalized Name structure in the filename for Presidio to catch it.
+    original_file_name = "Alice_Wonderland_Clinical_Note.pdf"
     
-    staged_file_path = tmp_path / "alice_note.pdf"
+    staged_file_path = tmp_path / original_file_name
     staged_file_path.write_bytes(pdf_bytes)
     
     fake_staged = StagedFile(
-        original_name="alice_note.pdf",
+        original_name=original_file_name,
         staged_path=str(staged_file_path),
         document_type=DocumentType.PDF,
         size_bytes=len(pdf_bytes),
@@ -162,3 +182,9 @@ async def test_privacy_agent_cleans_staged_pdf(
     # Verify the agent name was appended to the lineage
     assert "MedicalParserAgent" in doc.processed_by
     assert "PrivacyAgent" in doc.processed_by
+    
+    # Verify Filename scrubbed
+    assert "alice" not in doc.metadata["source_filename"].lower()
+    assert "wonderland" not in doc.metadata["source_filename"].lower()
+    assert "<PERSON>" in doc.metadata["source_filename"]
+    assert doc.metadata["source_filename"].endswith(".pdf")

@@ -12,13 +12,18 @@ excessive overhead across multiple calls.
 from typing import Any, Dict, List, Optional
 import os
 
-from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+SAFE_DICOM_KEYS = {
+    "StudyDate", "StudyTime", "Modality", "BodyPartExamined", "PixelSpacing",
+    "Rows", "Columns", "WindowCenter", "WindowWidth", "SeriesDescription",
+}
 
 
 class PrivacyService:
@@ -37,17 +42,44 @@ class PrivacyService:
         # Initialize Presidio Analyzer (uses spaCy under the hood for NER)
         self.analyzer = AnalyzerEngine()
         
+        # ── 1. Custom Recognizer: Medical Identifiers (MRN, Patient ID) ──
+        # Matches patterns like "Patient ID: 4839201", "MRN: 12345", "Case No: 999"
+        medical_id_pattern = Pattern(
+            name="medical_id_pattern",
+            regex=r"(?i)\b(?:patient[\s_-]?id|mrn|report[\s_-]?(?:no|number)|case[\s_-]?(?:no|number)|accession[\s_-]?(?:no|number))\s*[:#-]?\s*[A-Z0-9-]+\b",
+            score=0.85
+        )
+        medical_id_recognizer = PatternRecognizer(
+            supported_entity="MEDICAL_ID",
+            patterns=[medical_id_pattern]
+        )
+        self.analyzer.registry.add_recognizer(medical_id_recognizer)
+
+        # ── 2. Custom Recognizer: Misspelled/Prefixed Names ──
+        # Matches patterns like "Pt: J Doe", "Patient Name: Smith, John", "Dr. Patel", "Mrs. Brown"
+        # Presidio's built-in PERSON recognizer is good, but explicit prefixes boost confidence.
+        name_prefix_pattern = Pattern(
+            name="name_prefix_pattern",
+            regex=r"(?i)\b(?:pt|patient|patient name|patient:\s*name|dr|mr|mrs|ms)[.:]?\s*[:#-]?\s*[A-Z][a-z]*(?:\s*(?:[A-Z][a-z]*|\.))*\b",
+            score=0.85
+        )
+        name_prefix_recognizer = PatternRecognizer(
+            supported_entity="PERSON",  # Map to existing PERSON entity
+            patterns=[name_prefix_pattern]
+        )
+        self.analyzer.registry.add_recognizer(name_prefix_recognizer)
+        
         # Initialize Presidio Anonymizer (handles string replacement based on analyzer results)
         self.anonymizer = AnonymizerEngine()
         
         # Define the set of entities we actively want to scrub
-        # Excludes medical entities (which Presidio doesn't natively target anyway,
-        # but prevents accidental over-scrubbing)
+        # Includes our custom MEDICAL_ID
         self.entities = [
             "PERSON",
             "PHONE_NUMBER",
             "EMAIL_ADDRESS",
             "US_SSN",
+            "MEDICAL_ID",
             "CREDIT_CARD",
             "CRYPTO",
             "IBAN_CODE",
@@ -103,9 +135,15 @@ class PrivacyService:
         """
         Recursively traverse a dictionary and anonymize all string values.
         Used to clean the `metadata` dictionary returned by DICOM/PDF extractors.
+        Safe DICOM keys (like Modality) are strictly skipped to prevent data corruption.
         """
         clean_meta = {}
         for key, value in metadata.items():
+            # Skip safe keys (DICOM structural fields)
+            if key in SAFE_DICOM_KEYS:
+                clean_meta[key] = value
+                continue
+
             if isinstance(value, str):
                 clean_meta[key] = self.anonymize_text(value)
             elif isinstance(value, dict):

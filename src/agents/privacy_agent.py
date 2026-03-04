@@ -59,16 +59,32 @@ class PrivacyProtectionAgent(BaseAgent):
             
             anon_time_ms = int((time.time() - start_time) * 1000)
             
+            # Anonymize filename (keep extension)
+            import os
+            name_part, ext_part = os.path.splitext(original_name)
+            
+            # Presidio NER often misses names connected by underscores or hyphens.
+            # Convert them to spaces to give the analyzer the best chance, then scrub.
+            name_spaced = name_part.replace("_", " ").replace("-", " ")
+            clean_name_spaced = self.privacy_service.anonymize_text(name_spaced)
+            
+            # Re-join with underscores for a safe filename format
+            clean_name_part = clean_name_spaced.replace(" ", "_")
+            clean_filename = f"{clean_name_part}{ext_part}"
+            
             logger.debug(
                 "privacy_agent_file_clean",
                 file=original_name,
+                clean_file=clean_filename,
                 time_ms=anon_time_ms
             )
             
             # 4. Reconstruct clean schema
+            # Overwrite the filename in metadata if it exists, or add it.
+            clean_meta["source_filename"] = clean_filename
+            
             clean_doc = MedicalDocumentSchema(
                 document_id=raw_doc.document_id,
-                filename=original_name,
                 document_type=raw_doc.document_type,
                 raw_text=clean_text,
                 metadata=clean_meta,

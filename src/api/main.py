@@ -11,6 +11,9 @@ from src.models.intake_manifest import IntakeManifest
 from src.services.zip_intake import UnifiedBatchIntakeService, UploadedItem
 from src.services.privacy_service import PrivacyService
 from src.agents.privacy_agent import PrivacyProtectionAgent
+from src.services.terminology_service import TerminologyService
+from src.services.chunking_service import ChunkingService
+from src.agents.data_prep_agent import DataPrepAgent
 
 setup_logging()
 logger = get_logger(__name__)
@@ -25,14 +28,23 @@ batch_intake_service = UnifiedBatchIntakeService()
 privacy_service: PrivacyService = None
 privacy_agent: PrivacyProtectionAgent = None
 
+terminology_service: TerminologyService = None
+chunking_service: ChunkingService = None
+data_prep_agent: DataPrepAgent = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global privacy_service, privacy_agent
+    global privacy_service, privacy_agent, terminology_service, chunking_service, data_prep_agent
     logger.info("Application starting up", project=settings.project_name, env=settings.environment)
     # Lazy load the heavy NLP presidio models on startup
     privacy_service = PrivacyService()
     privacy_agent = PrivacyProtectionAgent(parser_agent=parser_agent, privacy_service=privacy_service)
+    
+    # Initialize Data Prep services
+    terminology_service = TerminologyService()
+    chunking_service = ChunkingService(target_chunk_size=1500, overlap=200)
+    data_prep_agent = DataPrepAgent(terminology=terminology_service, chunker=chunking_service)
     yield
     logger.info("Application shutting down")
 
@@ -208,3 +220,25 @@ async def privacy_scan(manifest: IntakeManifest) -> List[MedicalDocumentSchema]:
     except Exception as exc:
         logger.error("privacy_scan_failed", session_id=manifest.session_id, error=str(exc))
         raise HTTPException(status_code=500, detail="Internal error during privacy scanning.")
+
+
+@app.post("/prepare-data", response_model=List[MedicalDocumentSchema], tags=["Pipeline"])
+async def prepare_data(documents: List[MedicalDocumentSchema]) -> List[MedicalDocumentSchema]:
+    """
+    Phase 3 Data Preparation Endpoint.
+    
+    Accepts PII-scrubbed `MedicalDocumentSchema` objects (typically from Phase 2),
+    expands medical terminology, standardizes units, and cleanly chunks the text 
+    by clinical headers or overlap constraints for vector ingestion.
+    
+    Returns the enriched documents with `normalized_text` and `chunks`.
+    """
+    if not documents:
+        raise HTTPException(status_code=400, detail="No documents provided for data preparation.")
+        
+    try:
+        enriched_docs = await data_prep_agent.run(documents=documents)
+        return enriched_docs
+    except Exception as exc:
+        logger.error("data_prep_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail="Internal error during data preparation.")

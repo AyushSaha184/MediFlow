@@ -59,6 +59,14 @@ class MedicalDocumentSchema(BaseModel):
         default_factory=dict,
         description="Extracted laboratory values and reference ranges"
     )
+    normalized_text: Optional[str] = Field(
+        default=None,
+        description="Cleaned and terminology-expanded version of raw_text"
+    )
+    chunks: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Text fragments (with overlap and section metadata) optimized for RAG"
+    )
     clinical_notes: Optional[str] = Field(
         default="",
         description="Clinical notes or physician narrative"

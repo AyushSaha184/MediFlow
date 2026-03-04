@@ -1,0 +1,11 @@
+[
+  {
+    "text": "[GENERAL]\n# Merck Manual: Diabetes Mellitus\n\n## SYMPTOMS\n\nPolyuria, polydipsia, weight loss, sometimes with polyphagia, and blurred vision.\nPatients are usually asymptomatic at early stages.\n\n## DIAGNOSIS\n\nFasting plasma glucose (FPG) >= 126 mg/dL.\nHbA1c >= 6.5%.\n\n## TREATMENT\n\nDiet and exercise.\nInsulin.\nOral antihyperglycemics (e.g., Metformin).",
+    "section": "GENERAL",
+    "metadata": {
+      "chunk_type": "full_section",
+      "source_file": "sample_diabetes.md",
+      "origin": "global_store"
+    }
+  }
+]

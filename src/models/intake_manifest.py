@@ -41,7 +41,7 @@ class IntakeManifest(BaseModel):
     source_files: List[str] = Field(..., description="Original filenames uploaded by the user")
     staged_root: str = Field(
         ...,
-        description="Root directory where all extracted files live: data/<session_id>/"
+        description="Root directory where all extracted files live: data/User/<session_id>/"
     )
     total_files: int = Field(..., description="Total number of successfully staged files")
     skipped_files: List[str] = Field(

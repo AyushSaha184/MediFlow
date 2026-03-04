@@ -2,7 +2,7 @@
 src/services/zip_intake.py
 ---------------------------
 ZipIntakeService — extracts a mixed ZIP archive and organises its
-contents into type-specific subdirectories under data/<session_id>/.
+contents into type-specific subdirectories under data/User/<session_id>/.
 
 Folder structure created on disk
 ---------------------------------
@@ -49,7 +49,7 @@ _TYPE_FOLDER: Dict[DocumentType, str] = {
 }
 
 # Root data directory (project root/data/)
-_DATA_ROOT = Path(__file__).parent.parent.parent / "data"
+_DATA_ROOT = Path(__file__).parent.parent.parent / "data" / "User"
 
 from dataclasses import dataclass
 

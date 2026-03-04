@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -8,6 +9,17 @@ class Settings(BaseSettings):
     project_name: str = "MediFlow Multi-Agent Medical AI"
     environment: str = "dev"
     log_level: str = "INFO"
+    rag_embedding_provider: str = "nvidia_api"
+    rag_embedding_model_name: str = "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1"
+    rag_embedding_fallback_dimension: int = 384
+    rag_embedding_local_files_only: bool = True
+    rag_embedding_nvidia_api_url: str = "https://integrate.api.nvidia.com/v1/embeddings"
+    rag_embedding_nvidia_api_key: str = Field(default="", validation_alias="NVIDIA_EMBED_API_KEY")
+    rag_embedding_nvidia_truncate: str = "NONE"
+    rag_embedding_request_timeout_seconds: float = 60.0
+    rag_embedding_nvidia_max_batch_size: int = 32
+    rag_global_store_dir: str = "src/rag/global_store"
+    rag_patient_data_root: str = "data/User"
 
     model_config = SettingsConfigDict(
         env_file=".env",

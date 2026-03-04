@@ -1,4 +1,5 @@
 data/
+logs/
 venv/
 .env
 .pytest_cache/

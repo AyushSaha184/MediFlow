@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from typing import List
@@ -14,6 +15,15 @@ from src.agents.privacy_agent import PrivacyProtectionAgent
 from src.services.terminology_service import TerminologyService
 from src.services.chunking_service import ChunkingService
 from src.agents.data_prep_agent import DataPrepAgent
+from src.rag.embedding_service import EmbeddingService
+from src.agents.medical_rag_agent import MedicalRAGAgent
+from src.models.rag_models import (
+    RAGCleanupResponse,
+    RAGIndexPatientRequest,
+    RAGIndexPatientResponse,
+    RAGRetrieveRequest,
+    RAGRetrieveResponse,
+)
 
 setup_logging()
 logger = get_logger(__name__)
@@ -31,11 +41,14 @@ privacy_agent: PrivacyProtectionAgent = None
 terminology_service: TerminologyService = None
 chunking_service: ChunkingService = None
 data_prep_agent: DataPrepAgent = None
+rag_embedding_service: EmbeddingService = None
+medical_rag_agent: MedicalRAGAgent = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global privacy_service, privacy_agent, terminology_service, chunking_service, data_prep_agent
+    global rag_embedding_service, medical_rag_agent
     logger.info("Application starting up", project=settings.project_name, env=settings.environment)
     # Lazy load the heavy NLP presidio models on startup
     privacy_service = PrivacyService()
@@ -45,6 +58,23 @@ async def lifespan(app: FastAPI):
     terminology_service = TerminologyService()
     chunking_service = ChunkingService(target_chunk_size=1500, overlap=200)
     data_prep_agent = DataPrepAgent(terminology=terminology_service, chunker=chunking_service)
+
+    rag_embedding_service = EmbeddingService(
+        provider=settings.rag_embedding_provider,
+        model_name=settings.rag_embedding_model_name,
+        fallback_dimension=settings.rag_embedding_fallback_dimension,
+        local_files_only=settings.rag_embedding_local_files_only,
+        nvidia_api_url=settings.rag_embedding_nvidia_api_url,
+        nvidia_api_key=settings.rag_embedding_nvidia_api_key,
+        nvidia_truncate=settings.rag_embedding_nvidia_truncate,
+        request_timeout_seconds=settings.rag_embedding_request_timeout_seconds,
+        nvidia_max_batch_size=settings.rag_embedding_nvidia_max_batch_size,
+    )
+    medical_rag_agent = MedicalRAGAgent(
+        embedder=rag_embedding_service,
+        global_store_dir=Path(settings.rag_global_store_dir),
+        patient_data_root=Path(settings.rag_patient_data_root),
+    )
     yield
     logger.info("Application shutting down")
 
@@ -64,6 +94,12 @@ class HealthCheckResponse(BaseModel):
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
+
+def _require_rag_agent() -> MedicalRAGAgent:
+    if medical_rag_agent is None:
+        raise HTTPException(status_code=503, detail="MedicalRAGAgent is not initialized.")
+    return medical_rag_agent
+
 
 @app.get("/health", response_model=HealthCheckResponse, tags=["Utility"])
 async def health_check() -> HealthCheckResponse:
@@ -141,17 +177,17 @@ async def intake_batch(files: List[UploadFile] = File(...)) -> IntakeManifest:
     Unified batch intake endpoint.
 
     Accepts a list of mixed files (standalone PDFs, DCMs, images, XLSXs, 
-    and/or ZIP archives) and organises them all into a unified `data/<session_id>` 
+    and/or ZIP archives) and organises them all into a unified `data/User/<session_id>` 
     directory tree before AI processing starts.
 
     What happens
     ------------
     1. ZIP files in the batch are extracted in memory.
     2. All supported standalone files AND extracted ZIP contents are written to:
-       - `data/<session_id>/dicom/`
-       - `data/<session_id>/pdf/`
-       - `data/<session_id>/images/`
-       - `data/<session_id>/spreadsheets/`
+       - `data/User/<session_id>/dicom/`
+       - `data/User/<session_id>/pdf/`
+       - `data/User/<session_id>/images/`
+       - `data/User/<session_id>/spreadsheets/`
     3. An IntakeManifest is returned describing the entire batch.
     """
     uploaded_items: List[UploadedItem] = []
@@ -242,3 +278,69 @@ async def prepare_data(documents: List[MedicalDocumentSchema]) -> List[MedicalDo
     except Exception as exc:
         logger.error("data_prep_failed", error=str(exc))
         raise HTTPException(status_code=500, detail="Internal error during data preparation.")
+
+
+@app.post("/rag/index-patient", response_model=RAGIndexPatientResponse, tags=["RAG"])
+async def rag_index_patient(payload: RAGIndexPatientRequest) -> RAGIndexPatientResponse:
+    """
+    Build a session-scoped patient FAISS store from already prepared documents.
+    """
+    if not payload.documents:
+        raise HTTPException(status_code=400, detail="No documents provided for patient indexing.")
+
+    try:
+        rag_agent = _require_rag_agent()
+        stats = await rag_agent.ingest_patient_documents(
+            session_id=payload.session_id,
+            documents=payload.documents,
+        )
+        return RAGIndexPatientResponse(session_id=payload.session_id, **stats)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("rag_index_patient_failed", session_id=payload.session_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Internal error during patient indexing.")
+
+
+@app.post("/rag/retrieve", response_model=RAGRetrieveResponse, tags=["RAG"])
+async def rag_retrieve(payload: RAGRetrieveRequest) -> RAGRetrieveResponse:
+    """
+    Retrieve evidence from the patient session store and global medical store.
+    """
+    try:
+        rag_agent = _require_rag_agent()
+        results = rag_agent.retrieve(
+            query=payload.query,
+            session_id=payload.session_id,
+            top_k_patient=payload.top_k_patient,
+            top_k_global=payload.top_k_global,
+            top_k_total=payload.top_k_total,
+        )
+        return RAGRetrieveResponse(query=payload.query, results=results)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("rag_retrieve_failed", session_id=payload.session_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Internal error during retrieval.")
+
+
+@app.delete("/rag/session/{session_id}", response_model=RAGCleanupResponse, tags=["RAG"])
+async def rag_cleanup_session(session_id: str) -> RAGCleanupResponse:
+    """
+    Remove the session-scoped patient FAISS store.
+    """
+    try:
+        rag_agent = _require_rag_agent()
+        deleted = rag_agent.cleanup_session(session_id=session_id)
+        return RAGCleanupResponse(session_id=session_id, deleted=deleted)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("rag_cleanup_failed", session_id=session_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Internal error during session cleanup.")

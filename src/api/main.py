@@ -14,6 +14,8 @@ from src.services.privacy_service import PrivacyService
 from src.agents.privacy_agent import PrivacyProtectionAgent
 from src.services.terminology_service import TerminologyService
 from src.services.chunking_service import ChunkingService
+from src.services.session_context import atomic_session_lock
+from src.agents.vision_perception_agent import VisionPerceptionAgent
 from src.agents.data_prep_agent import DataPrepAgent
 from src.rag.embedding_service import EmbeddingService
 from src.agents.medical_rag_agent import MedicalRAGAgent
@@ -43,16 +45,17 @@ chunking_service: ChunkingService = None
 data_prep_agent: DataPrepAgent = None
 rag_embedding_service: EmbeddingService = None
 medical_rag_agent: MedicalRAGAgent = None
-
+vision_agent: VisionPerceptionAgent = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global privacy_service, privacy_agent, terminology_service, chunking_service, data_prep_agent
-    global rag_embedding_service, medical_rag_agent
+    global rag_embedding_service, medical_rag_agent, vision_agent
     logger.info("Application starting up", project=settings.project_name, env=settings.environment)
     # Lazy load the heavy NLP presidio models on startup
     privacy_service = PrivacyService()
-    privacy_agent = PrivacyProtectionAgent(parser_agent=parser_agent, privacy_service=privacy_service)
+    vision_agent = VisionPerceptionAgent()
+    privacy_agent = PrivacyProtectionAgent(parser_agent=parser_agent, privacy_service=privacy_service, vision_agent=vision_agent)
     
     # Initialize Data Prep services
     terminology_service = TerminologyService()
@@ -219,6 +222,13 @@ async def intake_batch(files: List[UploadFile] = File(...)) -> IntakeManifest:
 
     try:
         manifest = batch_intake_service.process_batch(items=uploaded_items)
+        
+        # 1. Initialize atomic session lock (Metadata Drift Safety)
+        async with atomic_session_lock(manifest.session_id, caller_name="intake_batch") as session:
+            # At this early stage, we set the initial lock if possible, 
+            # though patient IDs are mostly parsed during phase 1.
+            pass
+            
         return manifest
     except ValueError as ve:
         raise HTTPException(status_code=422, detail=str(ve))

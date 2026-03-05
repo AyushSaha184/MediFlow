@@ -14,9 +14,10 @@ import time
 from src.core.base_agent import BaseAgent
 from src.utils.logger import get_logger
 from src.models.intake_manifest import IntakeManifest
-from src.models.medical_document import MedicalDocumentSchema
+from src.models.medical_document import MedicalDocumentSchema, DocumentType
 from src.services.privacy_service import PrivacyService
 from src.agents.parser_agent import MedicalParserAgent
+from src.agents.vision_perception_agent import VisionPerceptionAgent
 
 logger = get_logger(__name__)
 
@@ -27,14 +28,20 @@ class PrivacyProtectionAgent(BaseAgent):
     PII-free structured medical documents.
     """
 
-    def __init__(self, parser_agent: MedicalParserAgent, privacy_service: PrivacyService):
+    def __init__(
+        self, 
+        parser_agent: MedicalParserAgent, 
+        privacy_service: PrivacyService,
+        vision_agent: Optional[VisionPerceptionAgent] = None
+    ):
         super().__init__(
             name="PrivacyAgent"
         )
         self.parser = parser_agent
         self.privacy_service = privacy_service
+        self.vision_agent = vision_agent
 
-    async def _process_single_file(self, staged_path: str, original_name: str, doc_type: str) -> Optional[MedicalDocumentSchema]:
+    async def _process_single_file(self, staged_path: str, original_name: str, doc_type: str, session_id: str) -> Optional[MedicalDocumentSchema]:
         """
         Extracts, validates, and anonymizes a single file.
         """
@@ -79,7 +86,28 @@ class PrivacyProtectionAgent(BaseAgent):
                 time_ms=anon_time_ms
             )
             
-            # 4. Reconstruct clean schema
+            # 4. Phase 1 Modality Multiplexer -> Phase 1.5 (Vision)
+            visual_findings_obj = None
+            if self.vision_agent and raw_doc.document_type in [DocumentType.DICOM, DocumentType.IMAGE]:
+                # Heuristic: If it's an image but has lots of OCR text, it might just be a scanned lab
+                # For this implementation, we route DICOMs and Images to Vision Agent.
+                try:
+                    vf_data = await self.vision_agent.analyze_image(
+                        file_path=staged_path,
+                        session_id=session_id
+                    )
+                    from src.models.medical_document import VisualFinding
+                    if "error" not in vf_data:
+                        visual_findings_obj = VisualFinding(
+                            modality=vf_data.get("modality", "Unknown"),
+                            ai_generated_preliminary_report=vf_data.get("ai_generated_preliminary_report", ""),
+                            key_observations=vf_data.get("key_observations", []),
+                            confidence_score=vf_data.get("confidence_score", 0.5)
+                        )
+                except Exception as ve:
+                    logger.error("vision_agent_failed", file=original_name, error=str(ve))
+            
+            # 5. Reconstruct clean schema
             # Overwrite the filename in metadata if it exists, or add it.
             clean_meta["source_filename"] = clean_filename
             
@@ -91,6 +119,10 @@ class PrivacyProtectionAgent(BaseAgent):
                 tabular_data=clean_tabular,
                 processed_by=[*raw_doc.processed_by, self.name]
             )
+            
+            if visual_findings_obj:
+                clean_doc.visual_findings = visual_findings_obj
+                
             return clean_doc
 
         except Exception as exc:
@@ -122,7 +154,8 @@ class PrivacyProtectionAgent(BaseAgent):
             clean_doc = await self._process_single_file(
                 staged_path=staged_file.staged_path,
                 original_name=staged_file.original_name,
-                doc_type=staged_file.document_type.value
+                doc_type=staged_file.document_type.value,
+                session_id=manifest.session_id
             )
             
             if clean_doc:

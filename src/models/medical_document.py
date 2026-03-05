@@ -13,6 +13,12 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+class VisualFinding(BaseModel):
+    modality: str
+    ai_generated_preliminary_report: str
+    key_observations: List[str]
+    confidence_score: float
+
 
 class DocumentType(str, Enum):
     """Supported medical document input types."""
@@ -36,6 +42,10 @@ class MedicalDocumentSchema(BaseModel):
     document_id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
         description="Unique identifier for this document instance"
+    )
+    document_timestamp: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 timestamp representing when the medical event/lab occurred (for temporal analysis)"
     )
     processed_by: List[str] = Field(
         default_factory=list,
@@ -70,6 +80,12 @@ class MedicalDocumentSchema(BaseModel):
     clinical_notes: Optional[str] = Field(
         default="",
         description="Clinical notes or physician narrative"
+    )
+
+    # ── Visuo-Clinical Data ──────────────────────────────────────────────────
+    visual_findings: Optional[VisualFinding] = Field(
+        default=None,
+        description="Results from the Phase 1.5 Visual Perception Agent"
     )
 
     # ── Tabular data for XLSX uploads ────────────────────────────────────────

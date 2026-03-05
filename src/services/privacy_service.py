@@ -68,6 +68,24 @@ class PrivacyService:
             patterns=[name_prefix_pattern]
         )
         self.analyzer.registry.add_recognizer(name_prefix_recognizer)
+
+        # ── 3. Custom Recognizer: Medical Allow-List ──
+        # Prevents over-anonymization of drugs/clinical terms that look like names or locations.
+        MEDICAL_ALLOW_LIST = [
+            "Aspirin", "Tylenol", "Ibuprofen", "Creatinine", "Hemoglobin", 
+            "Lisinopril", "Metformin", "Atorvastatin", "Amlodipine", "Omeprazole",
+            "Losartan", "Albuterol", "Gabapentin", "Hydrochlorothiazide",
+            "Sertraline", "Simvastatin", "Montelukast", "Escitalopram",
+            "Acetaminophen", "Rosuvastatin", "Bupropion"
+        ]
+        
+        # High score ensures it beats generic PERSON/LOCATION recognizers
+        medical_allow_recognizer = PatternRecognizer(
+            supported_entity="CLINICAL_TERM",
+            deny_list=MEDICAL_ALLOW_LIST
+        )
+        self.analyzer.registry.add_recognizer(medical_allow_recognizer)
+        
         
         # Initialize Presidio Anonymizer (handles string replacement based on analyzer results)
         self.anonymizer = AnonymizerEngine()

@@ -98,6 +98,7 @@ class MedicalRAGAgent(BaseAgent):
                     "metadata": {
                         **chunk_metadata,
                         "chunk_index": chunk_index,
+                        "document_timestamp": doc.document_timestamp,
                     },
                 }
                 all_chunks.append(payload)
@@ -215,11 +216,43 @@ class MedicalRAGAgent(BaseAgent):
             self.logger.info("rag_query_no_results", query=query, session_id=session_id)
             return []
 
-        merged_results.sort(key=lambda item: item[0])
+        # -- Decay Weighting Implementation --
+        # We penalize the L2 distance of older chunks so they rank lower than recent chunks.
+        from datetime import datetime
+        
+        weighted_results = []
+        for distance, metadata in merged_results:
+            ts_str = metadata.get("metadata", {}).get("document_timestamp")
+            penalty = 1.0 # Default no penalty (or for global knowledge)
+            
+            if ts_str and ts_str != "Historical":
+                try:
+                    # Very basic decay: compare to now. 
+                    # If this is 1 year old vs today, penalize.
+                    # For simplicity, we just use string sorting to rank them if we don't have perfect dates,
+                    # but date parsing is safer.
+                    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+                    days_old = (now - dt).days
+                    
+                    if days_old > 0:
+                        # 5% distance increase per month old, max 50%
+                        penalty_factor = min(0.5, (days_old / 30.0) * 0.05)
+                        penalty = 1.0 + penalty_factor
+                except Exception:
+                    penalty = 1.2 # Modest penalty for unparseable dates
+            elif origin := metadata.get("origin") == "patient_store" and not ts_str:
+                penalty = 1.2 # Penalize patient data with no timestamps slightly
+                
+            decayed_distance = distance * penalty
+            weighted_results.append((decayed_distance, metadata))
+
+        # Sort by the new decayed distance
+        weighted_results.sort(key=lambda item: item[0])
 
         final_chunks: List[Dict[str, Any]] = []
         seen_chunk_ids = set()
-        for distance, metadata in merged_results:
+        for distance, metadata in weighted_results:
             formatted = self._format_retrieval_hit(distance, metadata)
             if formatted["chunk_id"] in seen_chunk_ids:
                 continue

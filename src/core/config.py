@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     rag_embedding_nvidia_max_batch_size: int = 32
     rag_global_store_dir: str = "src/rag/global_store"
     rag_patient_data_root: str = "data/User"
+    
+    # Phase 5 LLM Settings/Cerebras
+    cerebras_api_key: str = Field(default="", validation_alias="CEREBRAS_API_KEY")
+    diagnostic_model_name: str = "llama3.1-8b"
+    
+    # Phase 1.5 Vision Model Settings / NVIDIA API
+    nvidia_api_key: str = Field(default="", validation_alias="NVIDIA_API_KEY")
+    vision_model_name: str = "google/gemma-3-27b-it"
 
     model_config = SettingsConfigDict(
         env_file=".env",

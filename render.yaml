@@ -21,3 +21,11 @@ services:
         sync: false              # paste your Supabase connection string here
       - key: ALLOWED_ORIGIN
         sync: false              # paste your Vercel URL, e.g. https://mediflow.vercel.app
+      - key: SUPABASE_URL
+        sync: false              # https://your-project-ref.supabase.co
+      - key: SUPABASE_SERVICE_KEY
+        sync: false              # service_role key from Supabase Settings → API
+      - key: SUPABASE_ANON_KEY
+        sync: false              # anon/public key from Supabase Settings → API
+      - key: LOG_LEVEL
+        value: INFO

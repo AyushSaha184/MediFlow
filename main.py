@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import httpx
 import os
 import shutil
 import uuid
@@ -447,6 +448,23 @@ async def delete_session(session_id: str) -> RAGCleanupResponse:
         if session_dir.exists() and session_dir.is_dir():
             shutil.rmtree(session_dir, ignore_errors=True)
             logger.info("session_disk_cleanup", session_id=session_id, path=str(session_dir))
+
+        # 3. Remove files from Supabase med-docs storage bucket
+        if settings.supabase_url and settings.supabase_service_key:
+            try:
+                delete_url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/med-docs"
+                headers = {
+                    "Authorization": f"Bearer {settings.supabase_service_key}",
+                    "apikey": settings.supabase_service_key,
+                }
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    await client.request(
+                        "DELETE", delete_url, headers=headers,
+                        json={"prefixes": [f"{session_id}/"]},
+                    )
+                logger.info("supabase_bucket_cleanup", session_id=session_id)
+            except Exception as _exc:
+                logger.warning("supabase_bucket_cleanup_failed", session_id=session_id, error=str(_exc))
 
         return RAGCleanupResponse(session_id=session_id, deleted=deleted)
     except ValueError as exc:

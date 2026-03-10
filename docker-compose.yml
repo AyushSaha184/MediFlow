@@ -50,6 +50,7 @@ services:
       PGVECTOR_DATABASE_URL: postgresql://postgres:postgres@db:5432/mediflow
       PYTHONPATH: /app
       PORT: "8000"
+      LOG_LEVEL: INFO
     volumes:
       # Mount data/ and logs/ so uploads and logs persist across container
       # restarts without re-building the image.

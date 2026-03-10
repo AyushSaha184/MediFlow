@@ -11,6 +11,7 @@ frontend/.vite/
 frontend/npm-debug.log*
 frontend/yarn.lock
 frontend/pnpm-lock.yaml
+frontend/package-lock.json
 
 # Python
 __pycache__/

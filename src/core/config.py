@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     nvidia_api_key: str = Field(default="", validation_alias="NVIDIA_API_KEY")
     vision_model_name: str = "google/gemma-3-27b-it"
 
+    # Supabase Storage (med-docs bucket for patient uploads)
+    supabase_url: str = Field(default="", validation_alias="SUPABASE_URL")
+    supabase_service_key: str = Field(default="", validation_alias="SUPABASE_SERVICE_KEY")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

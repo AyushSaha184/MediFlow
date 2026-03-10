@@ -1,8 +1,10 @@
 """
 src/rag/ingest_global.py
 ------------------------
-CLI Script to parse Markdown/Text medical guidelines from `data/knowledge_base/` 
-and embed them into the persistent `src/rag/global_store/` FAISS index.
+CLI Script to parse medical guidelines from `data/knowledge_base/` and embed
+them into the persistent pgvector `mediflow_knowledge` table.
+
+Supported formats: .md  .txt  .pdf  .csv  .docx
 
 Run this script manually whenever new literature is added to the system.
 Usage: python -m src.rag.ingest_global
@@ -23,12 +25,55 @@ logger = get_logger(__name__)
 KNOWLEDGE_BASE_DIR = "data/knowledge_base"
 GLOBAL_STORE_DIR = "src/rag/global_store"
 
+_SUPPORTED_EXTS = ("*.md", "*.txt", "*.pdf", "*.csv", "*.docx")
+
 
 def _iter_knowledge_files(kb_path: Path) -> List[Path]:
     files: List[Path] = []
-    for ext in ("*.md", "*.txt"):
+    for ext in _SUPPORTED_EXTS:
         files.extend(sorted(kb_path.glob(ext)))
     return files
+
+
+def _read_file(file_path: Path) -> str:
+    """Extract plain text from any supported file type."""
+    suffix = file_path.suffix.lower()
+
+    if suffix in (".md", ".txt"):
+        return file_path.read_text(encoding="utf-8", errors="replace")
+
+    if suffix == ".pdf":
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(str(file_path))
+            return "\n".join(page.get_text() for page in doc)
+        except Exception as exc:
+            logger.warning("ingest_pdf_read_failed", file=file_path.name, error=str(exc))
+            return ""
+
+    if suffix == ".csv":
+        try:
+            import pandas as pd
+            df = pd.read_csv(file_path)
+            # Convert each row to a readable sentence-like string
+            lines = []
+            for _, row in df.iterrows():
+                lines.append("  |  ".join(f"{col}: {val}" for col, val in row.items() if str(val).strip()))
+            return "\n".join(lines)
+        except Exception as exc:
+            logger.warning("ingest_csv_read_failed", file=file_path.name, error=str(exc))
+            return ""
+
+    if suffix == ".docx":
+        try:
+            from docx import Document
+            doc = Document(str(file_path))
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except Exception as exc:
+            logger.warning("ingest_docx_read_failed", file=file_path.name, error=str(exc))
+            return ""
+
+    return ""
 
 
 def _derive_existing_chunk_ids(store: PGVectorStore) -> set[str]:
@@ -66,8 +111,10 @@ def run_ingestion() -> Dict[str, int]:
 
     for file_path in files:
         logger.info("global_ingestion_processing_file", file=file_path.name)
-        with open(file_path, "r", encoding="utf-8") as handle:
-            content = handle.read()
+        content = _read_file(file_path)
+        if not content.strip():
+            logger.warning("global_ingestion_empty_file", file=file_path.name)
+            continue
 
         chunks = chunker.chunk_document(content)
         for chunk in chunks:

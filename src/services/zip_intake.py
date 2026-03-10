@@ -26,6 +26,7 @@ import json
 import uuid
 import zipfile
 import hashlib
+import httpx
 import filetype
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -154,6 +155,28 @@ class UnifiedBatchIntakeService:
             type=doc_type.value,
         )
 
+    def _upload_to_supabase(self, session_id: str, staged_files: List[StagedFile]) -> None:
+        """Upload staged files to the Supabase med-docs storage bucket."""
+        from src.core.config import settings
+        if not settings.supabase_url or not settings.supabase_service_key:
+            logger.warning("supabase_storage_skipped", reason="SUPABASE_URL or SUPABASE_SERVICE_KEY not configured")
+            return
+        base_url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/med-docs"
+        headers = {
+            "Authorization": f"Bearer {settings.supabase_service_key}",
+            "apikey": settings.supabase_service_key,
+        }
+        with httpx.Client(timeout=120.0) as client:
+            for sf in staged_files:
+                bucket_path = f"{session_id}/{Path(sf.staged_path).name}"
+                try:
+                    file_bytes = Path(sf.staged_path).read_bytes()
+                    resp = client.post(f"{base_url}/{bucket_path}", headers=headers, content=file_bytes)
+                    resp.raise_for_status()
+                    logger.info("supabase_upload_ok", file=sf.original_name, path=bucket_path)
+                except Exception as exc:
+                    logger.warning("supabase_upload_failed", file=sf.original_name, error=str(exc))
+
     def process_batch(self, items: List[UploadedItem], session_id: Optional[str] = None) -> IntakeManifest:
         """
         Process a mixed batch of ZIPs and standalone files.
@@ -238,5 +261,8 @@ class UnifiedBatchIntakeService:
         # Persist manifest to disk so analyze-medical-session can reload it
         manifest_path = session_root / "manifest.json"
         manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
+
+        # Upload staged files to Supabase med-docs bucket
+        self._upload_to_supabase(session_id, staged_files)
 
         return manifest

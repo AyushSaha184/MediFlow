@@ -43,13 +43,10 @@ RUN python -m spacy download en_core_web_sm
 COPY main.py .
 COPY src/  src/
 
-# Copy any knowledge-base files that were committed to the repo.
-# The data/User/ directory is intentionally excluded (runtime data, never baked in).
-COPY data/knowledge_base/ data/knowledge_base/
-
 # ── Runtime directories ───────────────────────────────────────────────────────
 # Create writable dirs that the app writes to at runtime.
-RUN mkdir -p data/User logs
+# knowledge_base/ is populated post-deployment via: python -m src.rag.ingest_global
+RUN mkdir -p data/knowledge_base data/User logs
 
 # ── Environment ───────────────────────────────────────────────────────────────
 ENV PYTHONPATH=/app

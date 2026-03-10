@@ -180,3 +180,6 @@ class VisionPerceptionAgent(BaseAgent):
             "confidence_score": finding_data.get("confidence_score", 0.5),
             "is_volumetric_sweep": finding_data.get("confidence_score", 0) >= self.CONFIDENCE_THRESHOLD and routed_data["type"] in ["DICOM", "NIFTI"]
         }
+
+    async def run(self, file_path: str, session_id: str, historical_findings: Optional[str] = None, implant_history: str = "") -> Dict[str, Any]:
+        return await self.analyze_image(file_path, session_id, historical_findings, implant_history)

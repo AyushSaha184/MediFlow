@@ -11,7 +11,7 @@ Usage: python -m src.rag.ingest_global
 from pathlib import Path
 from typing import Dict, List
 
-from src.rag.common import build_chunk_id, flatten_record, utc_now_iso
+from src.rag.common import build_chunk_id, utc_now_iso
 from src.rag.embedding_service import EmbeddingService
 from src.rag.pgvector_store import PGVectorStore, TABLE_KNOWLEDGE
 from src.utils.logger import get_logger
@@ -32,20 +32,7 @@ def _iter_knowledge_files(kb_path: Path) -> List[Path]:
 
 
 def _derive_existing_chunk_ids(store: PGVectorStore) -> set[str]:
-    chunk_ids = set(store.existing_chunk_ids())
-    for raw_record in store.metadata_store:
-        record = flatten_record(raw_record)
-        chunk_id = record.get("chunk_id")
-        if chunk_id:
-            chunk_ids.add(str(chunk_id))
-            continue
-
-        source_file = str(record.get("source_file") or "unknown")
-        section = str(record.get("section") or "GENERAL")
-        text = str(record.get("text") or "")
-        if text:
-            chunk_ids.add(build_chunk_id(source_file, section, text))
-    return chunk_ids
+    return set(store.existing_chunk_ids())
 
 
 def run_ingestion() -> Dict[str, int]:

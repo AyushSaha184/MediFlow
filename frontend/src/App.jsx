@@ -4,8 +4,9 @@ import { AlertTriangle, Play, FolderOpen, Minus } from "lucide-react";
 
 // In production (Vercel), VITE_API_URL is set to the Render backend URL.
 // In dev, it is empty and Vite's proxy forwards the requests to localhost:8000.
-if (import.meta.env.VITE_API_URL) {
-  axios.defaults.baseURL = import.meta.env.VITE_API_URL;
+const API_BASE = import.meta.env.VITE_API_URL ?? "";
+if (API_BASE) {
+  axios.defaults.baseURL = API_BASE;
 }
 
 // â”€â”€ Status badge styles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -125,8 +126,10 @@ function App() {
   // â”€â”€ Loading splash â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (!sessionId && !error) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#0f172a] text-slate-400 text-sm tracking-widest">
-        Initialising sessionâ€¦
+      <div className="flex h-screen flex-col items-center justify-center gap-3 bg-[#0f172a] text-slate-400 text-sm tracking-widest">
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
+        <span>Initialising session...</span>
+        <span className="text-xs text-slate-600">(first load may take up to 60 s while the backend wakes up)</span>
       </div>
     );
   }

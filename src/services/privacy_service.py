@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import os
 
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
@@ -39,8 +40,15 @@ class PrivacyService:
         # Suppress spaCy huggingface warnings if present
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         
-        # Initialize Presidio Analyzer (uses spaCy under the hood for NER)
-        self.analyzer = AnalyzerEngine()
+        # Explicitly configure Presidio to use en_core_web_sm.
+        # Without this, presidio defaults to en_core_web_lg (~400 MB RAM) which
+        # OOMs on Render's starter tier. The sm model is sufficient because
+        # Presidio's regex recognisers handle the bulk of PHI detection.
+        nlp_engine = NlpEngineProvider(nlp_configuration={
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+        }).create_engine()
+        self.analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
         
         # ── 1. Custom Recognizer: Medical Identifiers (MRN, Patient ID) ──
         # Matches patterns like "Patient ID: 4839201", "MRN: 12345", "Case No: 999"

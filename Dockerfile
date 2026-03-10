@@ -34,9 +34,10 @@ COPY requirements.txt .
 #    served by the NVIDIA API so no local model weights are needed).
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 2. Download the small spaCy model used by presidio-analyzer's NLP engine.
-#    en_core_web_sm (~12 MB) is sufficient — Presidio's regex recognisers
-#    handle the bulk of PHI detection; the NER model is a lightweight fallback.
+# 2. presidio-analyzer has en_core_web_lg as a pip dependency and installs it
+#    automatically (~400 MB). Uninstall it and replace with en_core_web_sm
+#    (~12 MB). presidio_service.py explicitly configures Presidio to use sm.
+RUN pip uninstall -y en-core-web-lg || true
 RUN python -m spacy download en_core_web_sm
 
 # ── Application code ──────────────────────────────────────────────────────────

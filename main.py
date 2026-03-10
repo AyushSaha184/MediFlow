@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -123,7 +124,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        # Production frontend – set ALLOWED_ORIGIN env var to your Vercel URL,
+        # e.g. https://mediflow.vercel.app
+        # Falls back to a wildcard only if the env var is not set (not recommended in prod).
+        os.environ.get("ALLOWED_ORIGIN", "*"),
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

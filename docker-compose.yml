@@ -1,0 +1,63 @@
+# ── MediFlow local development stack ─────────────────────────────────────────
+#
+# Starts:
+#   backend  →  FastAPI on http://localhost:8000
+#   db       →  PostgreSQL 16 + pgvector on localhost:5432
+#
+# Usage:
+#   docker compose up --build          # first run (builds the backend image)
+#   docker compose up                  # subsequent runs
+#   docker compose down -v             # stop and wipe the DB volume
+#
+# The frontend still runs via Vite:
+#   cd frontend && npm run dev         # http://localhost:5173
+#
+# For production deployment see render.yaml (backend) and frontend/vercel.json.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL + pgvector ─────────────────────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mediflow
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mediflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── FastAPI backend ───────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    # Load all secrets from .env; override the DB URL to point at the
+    # compose-internal 'db' service instead of Supabase.
+    env_file: .env
+    environment:
+      PGVECTOR_DATABASE_URL: postgresql://postgres:postgres@db:5432/mediflow
+      PYTHONPATH: /app
+      PORT: "8000"
+    volumes:
+      # Mount data/ and logs/ so uploads and logs persist across container
+      # restarts without re-building the image.
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

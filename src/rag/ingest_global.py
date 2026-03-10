@@ -13,7 +13,7 @@ from typing import Dict, List
 
 from src.rag.common import build_chunk_id, flatten_record, utc_now_iso
 from src.rag.embedding_service import EmbeddingService
-from src.rag.pgvector_store import PGVectorStore
+from src.rag.pgvector_store import PGVectorStore, TABLE_KNOWLEDGE
 from src.utils.logger import get_logger
 from src.services.chunking_service import ChunkingService
 from src.core.config import settings
@@ -69,7 +69,7 @@ def run_ingestion() -> Dict[str, int]:
         nvidia_max_batch_size=settings.rag_embedding_nvidia_max_batch_size,
     )
 
-    store = PGVectorStore.load_local(GLOBAL_STORE_DIR, dimension=embedder.dimension)
+    store = PGVectorStore.load_local(GLOBAL_STORE_DIR, dimension=embedder.dimension, table_name=TABLE_KNOWLEDGE)
     existing_chunk_ids = _derive_existing_chunk_ids(store)
     files = _iter_knowledge_files(kb_path)
 

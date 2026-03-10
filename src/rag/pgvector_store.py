@@ -24,7 +24,14 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-TABLE_NAME = "mediflow_vectors"
+# Two dedicated tables with different retention policies:
+#   mediflow_knowledge      — permanent clinical knowledge base (written once)
+#   mediflow_patient_vectors — ephemeral per-session patient data (TTL-deleted)
+TABLE_KNOWLEDGE = "mediflow_knowledge"
+TABLE_PATIENT = "mediflow_patient_vectors"
+
+# Kept for backwards-compat imports only; no longer used internally.
+TABLE_NAME = TABLE_KNOWLEDGE
 
 
 class _IndexProxy:
@@ -45,8 +52,9 @@ class PGVectorStore:
     PostgreSQL pgvector-backed replacement for FAISSStore.
 
     Each instance is scoped to one *namespace* (a free-form string derived
-    from the old FAISS directory path).  All namespaces share a single
-    ``mediflow_vectors`` table.
+    from the old FAISS directory path).  Use ``table_name=TABLE_KNOWLEDGE``
+    for the permanent clinical knowledge base and ``table_name=TABLE_PATIENT``
+    for ephemeral per-session patient data.
 
     Key behavioural notes
     ----------------------
@@ -61,11 +69,13 @@ class PGVectorStore:
         dimension: int,
         namespace: str,
         db_url: str,
+        table_name: str = TABLE_KNOWLEDGE,
         required_metadata_keys: Optional[Set[str]] = None,
     ) -> None:
         self.dimension = dimension
         self.namespace = namespace
         self._db_url = db_url
+        self._table_name = table_name
         self.required_metadata_keys = required_metadata_keys or set()
         self._conn = self._connect()
         self._ensure_schema()
@@ -86,7 +96,8 @@ class PGVectorStore:
         return self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     def _ensure_schema(self) -> None:
-        """Create the pgvector extension and the vectors table if absent."""
+        """Create the pgvector extension and the appropriate table if absent."""
+        tbl = self._table_name
         with self._conn.cursor() as cur:
             try:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
@@ -98,31 +109,47 @@ class PGVectorStore:
                         "Run `CREATE EXTENSION vector;` manually and retry."
                     ),
                 )
+            # Patient table gets a created_at column for scheduled TTL cleanup.
+            # Knowledge table omits it — that data is permanent.
+            extra_col = (
+                ",\n                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+                if tbl == TABLE_PATIENT
+                else ""
+            )
             cur.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                CREATE TABLE IF NOT EXISTS {tbl} (
                     id        BIGSERIAL PRIMARY KEY,
                     namespace TEXT    NOT NULL,
                     chunk_id  TEXT,
                     embedding vector({self.dimension}),
                     metadata  JSONB   NOT NULL DEFAULT '{{}}'
+                    {extra_col}
                 );
                 """
             )
             cur.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_ns "
-                f"ON {TABLE_NAME}(namespace);"
+                f"CREATE INDEX IF NOT EXISTS idx_{tbl}_ns "
+                f"ON {tbl}(namespace);"
             )
             cur.execute(
-                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_NAME}_ns_chunk "
-                f"ON {TABLE_NAME}(namespace, chunk_id) "
+                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{tbl}_ns_chunk "
+                f"ON {tbl}(namespace, chunk_id) "
                 f"WHERE chunk_id IS NOT NULL;"
             )
+            # Index created_at on the patient table so the scheduled cleanup
+            # query (DELETE WHERE created_at < NOW() - INTERVAL '24 hours')
+            # uses an index scan instead of a sequential scan.
+            if tbl == TABLE_PATIENT:
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{tbl}_created_at "
+                    f"ON {tbl}(created_at);"
+                )
 
     def _count(self) -> int:
         with self._get_cursor() as cur:
             cur.execute(
-                f"SELECT COUNT(*) AS cnt FROM {TABLE_NAME} WHERE namespace = %s",
+                f"SELECT COUNT(*) AS cnt FROM {self._table_name} WHERE namespace = %s",
                 (self.namespace,),
             )
             row = cur.fetchone()
@@ -150,7 +177,7 @@ class PGVectorStore:
     def existing_chunk_ids(self) -> Set[str]:
         with self._get_cursor() as cur:
             cur.execute(
-                f"SELECT chunk_id FROM {TABLE_NAME} "
+                f"SELECT chunk_id FROM {self._table_name} "
                 f"WHERE namespace = %s AND chunk_id IS NOT NULL",
                 (self.namespace,),
             )
@@ -223,7 +250,7 @@ class PGVectorStore:
             psycopg2.extras.execute_values(
                 cur,
                 f"""
-                INSERT INTO {TABLE_NAME} (namespace, chunk_id, embedding, metadata)
+                INSERT INTO {self._table_name} (namespace, chunk_id, embedding, metadata)
                 VALUES %s
                 ON CONFLICT (namespace, chunk_id) WHERE chunk_id IS NOT NULL DO NOTHING
                 """,
@@ -289,7 +316,7 @@ class PGVectorStore:
             cur.execute(
                 f"""
                 SELECT metadata, embedding <-> %s AS distance
-                FROM   {TABLE_NAME}
+                FROM   {self._table_name}
                 WHERE  namespace = %s
                 ORDER  BY embedding <-> %s
                 LIMIT  %s
@@ -320,7 +347,7 @@ class PGVectorStore:
         """
         with self._get_cursor() as cur:
             cur.execute(
-                f"DELETE FROM {TABLE_NAME} WHERE namespace = %s",
+                f"DELETE FROM {self._table_name} WHERE namespace = %s",
                 (self.namespace,),
             )
             count = cur.rowcount
@@ -343,6 +370,7 @@ class PGVectorStore:
         cls,
         directory: str,
         dimension: int = 384,
+        table_name: str = TABLE_KNOWLEDGE,
         required_metadata_keys: Optional[Set[str]] = None,
         db_url: Optional[str] = None,
     ) -> "PGVectorStore":
@@ -359,6 +387,10 @@ class PGVectorStore:
             Namespace key (historically a FAISS directory path).
         dimension:
             Expected embedding dimension.
+        table_name:
+            Which DB table to use.  Pass ``TABLE_KNOWLEDGE`` for the permanent
+            clinical knowledge base or ``TABLE_PATIENT`` for ephemeral session
+            data.  Defaults to ``TABLE_KNOWLEDGE``.
         required_metadata_keys:
             Optional set of keys that every metadata dict must contain.
         db_url:
@@ -372,6 +404,7 @@ class PGVectorStore:
             dimension=dimension,
             namespace=namespace,
             db_url=resolved_url,
+            table_name=table_name,
             required_metadata_keys=required_metadata_keys,
         )
         logger.info(

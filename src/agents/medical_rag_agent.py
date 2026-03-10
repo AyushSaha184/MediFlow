@@ -16,7 +16,7 @@ from src.core.base_agent import BaseAgent
 from src.models.medical_document import MedicalDocumentSchema
 from src.rag.common import build_chunk_id, flatten_record
 from src.rag.embedding_service import EmbeddingService
-from src.rag.pgvector_store import PGVectorStore
+from src.rag.pgvector_store import PGVectorStore, TABLE_KNOWLEDGE, TABLE_PATIENT
 from src.rag.crag_graph import build_crag_graph
 from src.services.llm_service import LLMService
 from src.utils.logger import get_logger
@@ -45,6 +45,7 @@ class MedicalRAGAgent(BaseAgent):
         self.global_store = PGVectorStore.load_local(
             str(self.global_store_dir),
             dimension=self.embedder.dimension,
+            table_name=TABLE_KNOWLEDGE,
             db_url=self._db_url,
         )
         self._patient_store_cache: Dict[str, PGVectorStore] = {}
@@ -79,6 +80,7 @@ class MedicalRAGAgent(BaseAgent):
         patient_store = PGVectorStore.load_local(
             str(store_path),
             dimension=self.embedder.dimension,
+            table_name=TABLE_PATIENT,
             required_metadata_keys={"chunk_id", "document_id", "source_file", "origin", "session_id", "text"},
             db_url=self._db_url,
         )
@@ -155,7 +157,10 @@ class MedicalRAGAgent(BaseAgent):
 
         store_path = self.get_patient_store_dir(session_id)
         store = PGVectorStore.load_local(
-            str(store_path), dimension=self.embedder.dimension, db_url=self._db_url
+            str(store_path),
+            dimension=self.embedder.dimension,
+            table_name=TABLE_PATIENT,
+            db_url=self._db_url,
         )
         if store._count() == 0:
             return None

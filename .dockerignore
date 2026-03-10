@@ -1,0 +1,40 @@
+# Git
+.git/
+.gitignore
+
+# Python runtime artefacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Local virtual environment
+venv/
+.venv/
+
+# Environment secrets – never bake into the image
+.env
+.env.*
+
+# Tests
+tests/
+.pytest_cache/
+*.log
+
+# Frontend – deployed separately to Vercel
+frontend/
+
+# Runtime data – written at runtime, not part of the image
+data/User/
+logs/
+
+# IDE / OS noise
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db

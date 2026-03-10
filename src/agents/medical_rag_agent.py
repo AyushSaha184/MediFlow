@@ -9,7 +9,6 @@ and the Global Knowledge Store simultaneously.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,7 +16,9 @@ from src.core.base_agent import BaseAgent
 from src.models.medical_document import MedicalDocumentSchema
 from src.rag.common import build_chunk_id, flatten_record
 from src.rag.embedding_service import EmbeddingService
-from src.rag.faiss_store import FAISSStore
+from src.rag.pgvector_store import PGVectorStore
+from src.rag.crag_graph import build_crag_graph
+from src.services.llm_service import LLMService
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,16 +33,35 @@ class MedicalRAGAgent(BaseAgent):
         embedder: EmbeddingService,
         global_store_dir: Path = GLOBAL_STORE_DIR,
         patient_data_root: Path = PATIENT_DATA_ROOT,
+        db_url: Optional[str] = None,
+        llm_service: Optional[LLMService] = None,
     ) -> None:
         super().__init__("MedicalRAGAgent")
         self.embedder = embedder
         self.global_store_dir = Path(global_store_dir)
         self.patient_data_root = Path(patient_data_root)
-        self.global_store = FAISSStore.load_local(
+        from src.core.config import settings
+        self._db_url = db_url or settings.pgvector_database_url
+        self.global_store = PGVectorStore.load_local(
             str(self.global_store_dir),
             dimension=self.embedder.dimension,
+            db_url=self._db_url,
         )
-        self._patient_store_cache: Dict[str, FAISSStore] = {}
+        self._patient_store_cache: Dict[str, PGVectorStore] = {}
+
+        # Build the CRAG graph if an LLM service is provided.
+        # Without an LLM, the agent falls back to direct (non-corrective) retrieval.
+        self._crag_graph = None
+        if llm_service is not None:
+            self._crag_graph = build_crag_graph(
+                embedder=self.embedder,
+                global_store=self.global_store,
+                get_patient_store_fn=self._get_patient_store,
+                llm_service=llm_service,
+            )
+            self.logger.info("crag_graph_enabled", msg="CRAG StateGraph active for retrieval.")
+        else:
+            self.logger.info("crag_graph_disabled", msg="No LLM service provided — using direct retrieval.")
 
     def get_patient_store_dir(self, session_id: str) -> Path:
         return self.patient_data_root / session_id / "rag_patient"
@@ -56,13 +76,13 @@ class MedicalRAGAgent(BaseAgent):
             raise ValueError("session_id is required for patient indexing.")
 
         store_path = self.get_patient_store_dir(session)
-        if store_path.exists():
-            shutil.rmtree(store_path)
-
-        patient_store = FAISSStore(
+        patient_store = PGVectorStore.load_local(
+            str(store_path),
             dimension=self.embedder.dimension,
             required_metadata_keys={"chunk_id", "document_id", "source_file", "origin", "session_id", "text"},
+            db_url=self._db_url,
         )
+        patient_store.delete_all()  # Clear any stale data for this session
 
         all_chunks: List[Dict[str, Any]] = []
         chunks_seen = 0
@@ -113,7 +133,7 @@ class MedicalRAGAgent(BaseAgent):
         embeddings = self.embedder.embed_batch(texts)
 
         chunks_added = patient_store.add(embeddings=embeddings, metadatas=all_chunks, dedupe_by_chunk_id=True)
-        patient_store.save_local(str(store_path))
+        # save_local is a no-op for pgvector; data is already persisted in PostgreSQL
         self._patient_store_cache[session] = patient_store
 
         for doc in documents:
@@ -129,15 +149,17 @@ class MedicalRAGAgent(BaseAgent):
         )
         return {"chunks_seen": chunks_seen, "chunks_embedded": chunks_added, "documents_indexed": len(documents)}
 
-    def _get_patient_store(self, session_id: str) -> Optional[FAISSStore]:
+    def _get_patient_store(self, session_id: str) -> Optional[PGVectorStore]:
         if session_id in self._patient_store_cache:
             return self._patient_store_cache[session_id]
 
         store_path = self.get_patient_store_dir(session_id)
-        if not store_path.exists():
+        store = PGVectorStore.load_local(
+            str(store_path), dimension=self.embedder.dimension, db_url=self._db_url
+        )
+        if store._count() == 0:
             return None
 
-        store = FAISSStore.load_local(str(store_path), dimension=self.embedder.dimension)
         self._patient_store_cache[session_id] = store
         return store
 
@@ -167,7 +189,7 @@ class MedicalRAGAgent(BaseAgent):
             "metadata": metadata_payload,
         }
 
-    def retrieve(
+    async def retrieve(
         self,
         query: str,
         session_id: Optional[str] = None,
@@ -176,7 +198,13 @@ class MedicalRAGAgent(BaseAgent):
         top_k_total: int = 8,
     ) -> List[Dict[str, Any]]:
         """
-        Search session patient store and global knowledge store, then merge by L2 distance.
+        Retrieve relevant chunks using the CRAG StateGraph when available,
+        falling back to direct retrieval if no LLM service was provided.
+
+        Returns the list of formatted chunk dicts.  When CRAG is active and
+        retrieval quality is poor after all retries, the chunks are still
+        returned but each hit carries ``metadata["low_confidence"] = True``
+        so DiagnosticAgent can factor that in.
         """
         if not query or not query.strip():
             raise ValueError("query must be non-empty.")
@@ -190,74 +218,95 @@ class MedicalRAGAgent(BaseAgent):
             top_k_patient=top_k_patient,
             top_k_global=top_k_global,
             top_k_total=top_k_total,
+            crag_active=self._crag_graph is not None,
         )
 
-        q_vec = self.embedder.embed_text(query)
+        # ── CRAG path ────────────────────────────────────────────────────────
+        if self._crag_graph is not None:
+            initial_state = {
+                "query": query,
+                "session_id": session_id,
+                "top_k_patient": top_k_patient,
+                "top_k_global": top_k_global,
+                "top_k_total": top_k_total,
+                "rewrite_count": 0,
+                "raw_hits": [],
+                "graded_hits": [],
+                "rejected_hits": [],
+                "results": [],
+                "low_confidence": False,
+            }
+            final_state = await self._crag_graph.ainvoke(initial_state)
+            results = final_state.get("results", [])
+            low_confidence = final_state.get("low_confidence", False)
+            rewrite_count = final_state.get("rewrite_count", 0)
 
-        merged_results: List[tuple[float, Dict[str, Any]]] = []
+            if low_confidence:
+                self.logger.warning(
+                    "rag_low_confidence",
+                    query=query,
+                    session_id=session_id,
+                    rewrite_count=rewrite_count,
+                    msg="Passing weak context to DiagnosticAgent with low_confidence flag.",
+                )
+                for hit in results:
+                    hit.setdefault("metadata", {})["low_confidence"] = True
+
+            self.logger.info(
+                "rag_crag_complete",
+                results=len(results),
+                low_confidence=low_confidence,
+                rewrite_count=rewrite_count,
+            )
+            return results
+
+        # ── Direct retrieval fallback (no LLM grading) ───────────────────────
+        from datetime import datetime
+        q_vec = self.embedder.embed_text(query)
+        merged: List[tuple[float, Dict[str, Any]]] = []
 
         if session_id:
             patient_store = self._get_patient_store(session_id)
             if patient_store and patient_store.index.ntotal > 0:
-                patient_results = patient_store.search(
-                    q_vec,
-                    k=top_k_patient,
-                    metadata_filter={"session_id": session_id},
+                merged.extend(
+                    patient_store.search(q_vec, k=top_k_patient,
+                                         metadata_filter={"session_id": session_id})
                 )
-                merged_results.extend(patient_results)
             else:
                 self.logger.info("rag_patient_store_missing", session_id=session_id)
 
         if self.global_store.index.ntotal > 0:
-            global_results = self.global_store.search(q_vec, k=top_k_global)
-            merged_results.extend(global_results)
+            merged.extend(self.global_store.search(q_vec, k=top_k_global))
 
-        if not merged_results:
+        if not merged:
             self.logger.info("rag_query_no_results", query=query, session_id=session_id)
             return []
 
-        # -- Decay Weighting Implementation --
-        # We penalize the L2 distance of older chunks so they rank lower than recent chunks.
-        from datetime import datetime
-        
-        weighted_results = []
-        for distance, metadata in merged_results:
+        weighted: List[tuple[float, Dict[str, Any]]] = []
+        for distance, metadata in merged:
             ts_str = metadata.get("metadata", {}).get("document_timestamp")
-            penalty = 1.0 # Default no penalty (or for global knowledge)
-            
+            penalty = 1.0
             if ts_str and ts_str != "Historical":
                 try:
-                    # Very basic decay: compare to now. 
-                    # If this is 1 year old vs today, penalize.
-                    # For simplicity, we just use string sorting to rank them if we don't have perfect dates,
-                    # but date parsing is safer.
                     dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                     now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
                     days_old = (now - dt).days
-                    
                     if days_old > 0:
-                        # 5% distance increase per month old, max 50%
-                        penalty_factor = min(0.5, (days_old / 30.0) * 0.05)
-                        penalty = 1.0 + penalty_factor
+                        penalty = 1.0 + min(0.5, (days_old / 30.0) * 0.05)
                 except Exception:
-                    penalty = 1.2 # Modest penalty for unparseable dates
-            elif origin := metadata.get("origin") == "patient_store" and not ts_str:
-                penalty = 1.2 # Penalize patient data with no timestamps slightly
-                
-            decayed_distance = distance * penalty
-            weighted_results.append((decayed_distance, metadata))
+                    penalty = 1.2
+            weighted.append((distance * penalty, metadata))
 
-        # Sort by the new decayed distance
-        weighted_results.sort(key=lambda item: item[0])
+        weighted.sort(key=lambda x: x[0])
 
         final_chunks: List[Dict[str, Any]] = []
-        seen_chunk_ids = set()
-        for distance, metadata in weighted_results:
-            formatted = self._format_retrieval_hit(distance, metadata)
-            if formatted["chunk_id"] in seen_chunk_ids:
+        seen: set = set()
+        for distance, metadata in weighted:
+            fmt = self._format_retrieval_hit(distance, metadata)
+            if fmt["chunk_id"] in seen:
                 continue
-            seen_chunk_ids.add(formatted["chunk_id"])
-            final_chunks.append(formatted)
+            seen.add(fmt["chunk_id"])
+            final_chunks.append(fmt)
             if len(final_chunks) >= top_k_total:
                 break
 
@@ -265,18 +314,23 @@ class MedicalRAGAgent(BaseAgent):
 
     def cleanup_session(self, session_id: str) -> bool:
         """
-        Delete only the RAG patient store directory for a session.
+        Delete the pgvector rows for the session's patient store namespace.
         """
         session = (session_id or "").strip()
         if not session:
             raise ValueError("session_id is required for cleanup.")
 
         store_path = self.get_patient_store_dir(session)
-        deleted = store_path.exists()
-        if deleted:
-            shutil.rmtree(store_path, ignore_errors=True)
+        cached = self._patient_store_cache.pop(session, None)
+        if cached is not None:
+            deleted_count = cached.delete_all()
+        else:
+            store = PGVectorStore.load_local(
+                str(store_path), dimension=self.embedder.dimension, db_url=self._db_url
+            )
+            deleted_count = store.delete_all()
 
-        self._patient_store_cache.pop(session, None)
+        deleted = deleted_count > 0
         self.logger.info("rag_session_cleanup", session_id=session, deleted=deleted)
         return deleted
 

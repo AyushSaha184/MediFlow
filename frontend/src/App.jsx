@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import { ArrowDown, FolderOpen, Play } from "lucide-react";
 
@@ -9,15 +9,38 @@ const statusStyles = {
 };
 
 function App() {
-  const [sessionId] = useState("default-session");
+  const [sessionId, setSessionId] = useState(null);
+  const sessionIdRef = useRef(null); // stable ref for the unload handler
   const [statusRows, setStatusRows] = useState([]);
   const [finalDiagnosticReport, setFinalDiagnosticReport] = useState(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const hasUploadedFiles = statusRows.length > 0;
 
+  useEffect(() => {
+    // Create a fresh isolated session when the page first loads
+    axios.post("/session/create")
+      .then((res) => {
+        setSessionId(res.data.session_id);
+        sessionIdRef.current = res.data.session_id;
+      })
+      .catch((err) => console.error("Failed to create session:", err));
+
+    // Cleanup: fires on tab close, refresh, or navigation away
+    const handleUnload = () => {
+      const sid = sessionIdRef.current;
+      if (!sid) return;
+      // sendBeacon keeps the request alive even as the page unloads.
+      // Uses the POST /session/{id}/cleanup endpoint (beacon only supports POST).
+      navigator.sendBeacon(`/session/${sid}/cleanup`);
+    };
+
+    window.addEventListener("beforeunload", handleUnload);
+    return () => window.removeEventListener("beforeunload", handleUnload);
+  }, []);
+
   const handleFileUpload = async (event) => {
     const files = Array.from(event.target.files ?? []);
-    if (!files.length || !sessionId.trim()) {
+    if (!files.length || !sessionId) {
       return;
     }
 
@@ -38,7 +61,7 @@ function App() {
   };
 
   const handleStartAnalysis = async () => {
-    if (!sessionId.trim()) {
+    if (!sessionId) {
       return;
     }
 
@@ -59,6 +82,15 @@ function App() {
       setIsAnalyzing(false);
     }
   };
+
+  // Block the UI until the session is ready
+  if (!sessionId) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#0f172a] text-slate-400 text-sm tracking-widest">
+        Initialising session…
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen overflow-hidden bg-[#0f172a] text-slate-100">

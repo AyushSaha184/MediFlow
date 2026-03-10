@@ -22,12 +22,13 @@ the responsibility of the caller (or a background task in production).
 from __future__ import annotations
 
 import io
+import json
 import uuid
 import zipfile
 import hashlib
 import filetype
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from src.models.document_type_map import EXTENSION_TO_DOC_TYPE
 from src.models.intake_manifest import IntakeManifest, StagedFile
@@ -153,7 +154,7 @@ class UnifiedBatchIntakeService:
             type=doc_type.value,
         )
 
-    def process_batch(self, items: List[UploadedItem]) -> IntakeManifest:
+    def process_batch(self, items: List[UploadedItem], session_id: Optional[str] = None) -> IntakeManifest:
         """
         Process a mixed batch of ZIPs and standalone files.
         """
@@ -161,7 +162,7 @@ class UnifiedBatchIntakeService:
         source_names = [item.filename for item in items]
         logger.info("batch_intake_started", sources=source_names, total_size=total_size)
 
-        session_id = uuid.uuid4().hex[:12]
+        session_id = session_id or uuid.uuid4().hex[:12]
         session_root = self.data_root / session_id
         session_root.mkdir(parents=True, exist_ok=True)
 
@@ -233,4 +234,9 @@ class UnifiedBatchIntakeService:
             skipped=len(skipped),
             types=list(by_type.keys()),
         )
+
+        # Persist manifest to disk so analyze-medical-session can reload it
+        manifest_path = session_root / "manifest.json"
+        manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
+
         return manifest

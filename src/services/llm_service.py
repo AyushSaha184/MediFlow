@@ -13,8 +13,8 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 class LLMService:
-    def __init__(self):
-        self.api_key = settings.cerebras_api_key
+    def __init__(self, api_key: str = ""):
+        self.api_key = api_key or settings.cerebras_api_key
         self.model_name = settings.diagnostic_model_name
         self._client = None
         if self.api_key:

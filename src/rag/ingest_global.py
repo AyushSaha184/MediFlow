@@ -13,7 +13,7 @@ from typing import Dict, List
 
 from src.rag.common import build_chunk_id, flatten_record, utc_now_iso
 from src.rag.embedding_service import EmbeddingService
-from src.rag.faiss_store import FAISSStore
+from src.rag.pgvector_store import PGVectorStore
 from src.utils.logger import get_logger
 from src.services.chunking_service import ChunkingService
 from src.core.config import settings
@@ -31,7 +31,7 @@ def _iter_knowledge_files(kb_path: Path) -> List[Path]:
     return files
 
 
-def _derive_existing_chunk_ids(store: FAISSStore) -> set[str]:
+def _derive_existing_chunk_ids(store: PGVectorStore) -> set[str]:
     chunk_ids = set(store.existing_chunk_ids())
     for raw_record in store.metadata_store:
         record = flatten_record(raw_record)
@@ -69,7 +69,7 @@ def run_ingestion() -> Dict[str, int]:
         nvidia_max_batch_size=settings.rag_embedding_nvidia_max_batch_size,
     )
 
-    store = FAISSStore.load_local(GLOBAL_STORE_DIR, dimension=embedder.dimension)
+    store = PGVectorStore.load_local(GLOBAL_STORE_DIR, dimension=embedder.dimension)
     existing_chunk_ids = _derive_existing_chunk_ids(store)
     files = _iter_knowledge_files(kb_path)
 

@@ -1,6 +1,9 @@
 from contextlib import asynccontextmanager
+import shutil
+import uuid
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 
@@ -26,6 +29,13 @@ from src.models.rag_models import (
     RAGRetrieveRequest,
     RAGRetrieveResponse,
 )
+from src.agents.diagnostic_agent import DiagnosticAgent
+from src.agents.explainability_agent import ExplainabilityAgent
+from src.services.llm_service import LLMService
+from src.services.explanation_service import ExplanationService
+from src.services.numerical_extractor import NumericalGuardrailsExtractor
+from src.pipelines.medical_pipeline import MedicalPipeline
+from src.models.diagnostic_models import FinalDiagnosticReport
 
 setup_logging()
 logger = get_logger(__name__)
@@ -46,11 +56,17 @@ data_prep_agent: DataPrepAgent = None
 rag_embedding_service: EmbeddingService = None
 medical_rag_agent: MedicalRAGAgent = None
 vision_agent: VisionPerceptionAgent = None
+llm_service: LLMService = None
+diagnostic_agent: DiagnosticAgent = None
+explanation_service: ExplanationService = None
+explainability_agent: ExplainabilityAgent = None
+medical_pipeline: MedicalPipeline = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global privacy_service, privacy_agent, terminology_service, chunking_service, data_prep_agent
     global rag_embedding_service, medical_rag_agent, vision_agent
+    global llm_service, diagnostic_agent, explanation_service, explainability_agent, medical_pipeline
     logger.info("Application starting up", project=settings.project_name, env=settings.environment)
     # Lazy load the heavy NLP presidio models on startup
     privacy_service = PrivacyService()
@@ -73,10 +89,27 @@ async def lifespan(app: FastAPI):
         request_timeout_seconds=settings.rag_embedding_request_timeout_seconds,
         nvidia_max_batch_size=settings.rag_embedding_nvidia_max_batch_size,
     )
+    llm_service = LLMService(api_key=settings.cerebras_api_key)
     medical_rag_agent = MedicalRAGAgent(
         embedder=rag_embedding_service,
         global_store_dir=Path(settings.rag_global_store_dir),
         patient_data_root=Path(settings.rag_patient_data_root),
+        llm_service=llm_service,
+    )
+    
+    # Initialize Phase 5 & 6 Agents — reuse the same llm_service instance already created above
+    numerical_extractor = NumericalGuardrailsExtractor()
+    diagnostic_agent = DiagnosticAgent(llm_service=llm_service, extractor=numerical_extractor)
+    explanation_service = ExplanationService(terminology_service=terminology_service)
+    explainability_agent = ExplainabilityAgent(llm_service=llm_service, explanation_service=explanation_service)
+    
+    # Initialize Phase 7 Pipeline Orchestrator
+    medical_pipeline = MedicalPipeline(
+        privacy_agent=privacy_agent,
+        data_prep_agent=data_prep_agent,
+        rag_agent=medical_rag_agent,
+        diagnostic_agent=diagnostic_agent,
+        explainability_agent=explainability_agent
     )
     yield
     logger.info("Application shutting down")
@@ -88,12 +121,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
 class HealthCheckResponse(BaseModel):
     status: str
     environment: str
+
+class SessionCreateResponse(BaseModel):
+    session_id: str
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -103,6 +147,20 @@ def _require_rag_agent() -> MedicalRAGAgent:
         raise HTTPException(status_code=503, detail="MedicalRAGAgent is not initialized.")
     return medical_rag_agent
 
+def _require_pipeline() -> MedicalPipeline:
+    if medical_pipeline is None:
+        raise HTTPException(status_code=503, detail="MedicalPipeline is not initialized.")
+    return medical_pipeline
+
+
+@app.post("/session/create", response_model=SessionCreateResponse, tags=["Session"])
+async def create_session() -> SessionCreateResponse:
+    """
+    Create a new isolated session. Returns a UUID that the frontend
+    must attach to every subsequent request as the session_id.
+    """
+    return SessionCreateResponse(session_id=str(uuid.uuid4()))
+
 
 @app.get("/health", response_model=HealthCheckResponse, tags=["Utility"])
 async def health_check() -> HealthCheckResponse:
@@ -111,6 +169,29 @@ async def health_check() -> HealthCheckResponse:
     """
     logger.debug("Health check requested")
     return HealthCheckResponse(status="ok", environment=settings.environment)
+
+@app.post("/analyze-medical-session/{session_id}", response_model=FinalDiagnosticReport, tags=["Pipeline"])
+async def analyze_medical_session(session_id: str) -> FinalDiagnosticReport:
+    """
+    Phase 7 Orchestrator: Runs the full 8-phase lifecycle for a staged Intake session.
+    Takes a session_id (e.g., from /intake-batch), loads the manifest, and executes:
+    Privacy (Phase 2), Data Prep (Phase 3), RAG (Phase 4), Diagnosis (Phase 5), and Explainability (Phase 6).
+    """
+    pipeline = _require_pipeline()
+    
+    # Reconstruct the manifest from the staging directory logic
+    # (In a real app, you'd load this from a DB or session store)
+    manifest_path = batch_intake_service.data_root / session_id / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found or expired.")
+        
+    try:
+        manifest = IntakeManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+        final_report = await pipeline.analyze_session(manifest)
+        return final_report
+    except Exception as e:
+        logger.error("analyze_session_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 
 @app.post("/upload", response_model=MedicalDocumentSchema, tags=["Pipeline"])
@@ -175,7 +256,10 @@ async def upload_document(file: UploadFile = File(...)) -> MedicalDocumentSchema
 
 
 @app.post("/intake", response_model=IntakeManifest, tags=["Pipeline"])
-async def intake_batch(files: List[UploadFile] = File(...)) -> IntakeManifest:
+async def intake_batch(
+    files: List[UploadFile] = File(...),
+    session_id: str = Query(..., description="Session UUID obtained from POST /session/create"),
+) -> IntakeManifest:
     """
     Unified batch intake endpoint.
 
@@ -221,7 +305,7 @@ async def intake_batch(files: List[UploadFile] = File(...)) -> IntakeManifest:
         raise HTTPException(status_code=400, detail="No valid files provided.")
 
     try:
-        manifest = batch_intake_service.process_batch(items=uploaded_items)
+        manifest = batch_intake_service.process_batch(items=uploaded_items, session_id=session_id)
         
         # 1. Initialize atomic session lock (Metadata Drift Safety)
         async with atomic_session_lock(manifest.session_id, caller_name="intake_batch") as session:
@@ -321,7 +405,7 @@ async def rag_retrieve(payload: RAGRetrieveRequest) -> RAGRetrieveResponse:
     """
     try:
         rag_agent = _require_rag_agent()
-        results = rag_agent.retrieve(
+        results = await rag_agent.retrieve(
             query=payload.query,
             session_id=payload.session_id,
             top_k_patient=payload.top_k_patient,
@@ -338,19 +422,45 @@ async def rag_retrieve(payload: RAGRetrieveRequest) -> RAGRetrieveResponse:
         raise HTTPException(status_code=500, detail="Internal error during retrieval.")
 
 
-@app.delete("/rag/session/{session_id}", response_model=RAGCleanupResponse, tags=["RAG"])
-async def rag_cleanup_session(session_id: str) -> RAGCleanupResponse:
+@app.delete("/session/{session_id}", response_model=RAGCleanupResponse, tags=["Session"])
+async def delete_session(session_id: str) -> RAGCleanupResponse:
     """
-    Remove the session-scoped patient FAISS store.
+    Full session teardown: deletes pgvector embeddings AND all files from
+    data/User/<session_id>/ on disk.  Called automatically by the frontend
+    on page unload via navigator.sendBeacon.
     """
     try:
+        # 1. Remove pgvector rows
         rag_agent = _require_rag_agent()
         deleted = rag_agent.cleanup_session(session_id=session_id)
+
+        # 2. Remove staged files from disk
+        session_dir = Path(settings.rag_patient_data_root) / session_id
+        if session_dir.exists() and session_dir.is_dir():
+            shutil.rmtree(session_dir, ignore_errors=True)
+            logger.info("session_disk_cleanup", session_id=session_id, path=str(session_dir))
+
         return RAGCleanupResponse(session_id=session_id, deleted=deleted)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("rag_cleanup_failed", session_id=session_id, error=str(exc))
+        logger.error("session_cleanup_failed", session_id=session_id, error=str(exc))
         raise HTTPException(status_code=500, detail="Internal error during session cleanup.")
+
+
+# Keep the old RAG-scoped route as an alias so existing integrations don't break
+@app.delete("/rag/session/{session_id}", response_model=RAGCleanupResponse, tags=["RAG"], include_in_schema=False)
+async def rag_cleanup_session(session_id: str) -> RAGCleanupResponse:
+    return await delete_session(session_id)
+
+
+@app.post("/session/{session_id}/cleanup", tags=["Session"])
+async def session_cleanup_beacon(session_id: str) -> dict:
+    """
+    Beacon-compatible cleanup endpoint (POST) used by navigator.sendBeacon on
+    page unload.  Performs the same full teardown as DELETE /session/{session_id}.
+    """
+    await delete_session(session_id)
+    return {"ok": True}

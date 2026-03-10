@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     rag_embedding_nvidia_max_batch_size: int = 32
     rag_global_store_dir: str = "src/rag/global_store"
     rag_patient_data_root: str = "data/User"
+    pgvector_database_url: str = Field(
+        default="postgresql://postgres:postgres@localhost:5432/mediflow",
+        validation_alias="PGVECTOR_DATABASE_URL",
+    )
     
     # Phase 5 LLM Settings/Cerebras
     cerebras_api_key: str = Field(default="", validation_alias="CEREBRAS_API_KEY")

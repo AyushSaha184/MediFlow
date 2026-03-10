@@ -3,7 +3,7 @@ services:
     name: mediflow-backend
     runtime: docker              # uses the repo's Dockerfile
     dockerfilePath: ./Dockerfile # explicit path (default, but stated for clarity)
-    plan: starter                # upgrade to standard for more RAM (spacy + torch need ~1.5 GB)
+    plan: starter                # ~500 MB image — fits comfortably on starter
     numInstances: 1
     envVars:
       # Set these in the Render dashboard – never commit real values

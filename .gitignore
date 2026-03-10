@@ -2,6 +2,7 @@ data/
 logs/
 venv/
 .env
+render.yaml
 .pytest_cache/
 *.log
 tests/

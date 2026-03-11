@@ -36,8 +36,10 @@ from src.agents.explainability_agent import ExplainabilityAgent
 from src.services.llm_service import LLMService
 from src.services.explanation_service import ExplanationService
 from src.services.numerical_extractor import NumericalGuardrailsExtractor
+from src.services.hitl_review_service import HITLReviewService
+from src.services.redis_cache_service import RedisCacheService
 from src.pipelines.medical_pipeline import MedicalPipeline
-from src.models.diagnostic_models import FinalDiagnosticReport
+from src.models.diagnostic_models import FinalDiagnosticReport, HITLReviewActionRequest, HITLReviewStatus, StructuredDiagnosis
 
 setup_logging()
 logger = get_logger(__name__)
@@ -63,12 +65,14 @@ diagnostic_agent: DiagnosticAgent = None
 explanation_service: ExplanationService = None
 explainability_agent: ExplainabilityAgent = None
 medical_pipeline: MedicalPipeline = None
+hitl_review_service: HITLReviewService = None
+redis_cache_service: RedisCacheService = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global privacy_service, privacy_agent, terminology_service, chunking_service, data_prep_agent
     global rag_embedding_service, medical_rag_agent, vision_agent
-    global llm_service, diagnostic_agent, explanation_service, explainability_agent, medical_pipeline
+    global llm_service, diagnostic_agent, explanation_service, explainability_agent, medical_pipeline, hitl_review_service, redis_cache_service
     logger.info("Application starting up", project=settings.project_name, env=settings.environment)
     # Lazy load the heavy NLP presidio models on startup
     privacy_service = PrivacyService()
@@ -80,6 +84,11 @@ async def lifespan(app: FastAPI):
     chunking_service = ChunkingService(target_chunk_size=1500, overlap=200)
     data_prep_agent = DataPrepAgent(terminology=terminology_service, chunker=chunking_service)
 
+    redis_cache_service = RedisCacheService(
+        redis_url=settings.redis_url,
+        key_prefix=settings.cache_key_prefix,
+    )
+
     rag_embedding_service = EmbeddingService(
         provider=settings.rag_embedding_provider,
         model_name=settings.rag_embedding_model_name,
@@ -90,13 +99,21 @@ async def lifespan(app: FastAPI):
         nvidia_truncate=settings.rag_embedding_nvidia_truncate,
         request_timeout_seconds=settings.rag_embedding_request_timeout_seconds,
         nvidia_max_batch_size=settings.rag_embedding_nvidia_max_batch_size,
+        cache_service=redis_cache_service,
+        cache_ttl_seconds=settings.cache_embedding_ttl_seconds,
     )
-    llm_service = LLMService(api_key=settings.cerebras_api_key)
+    llm_service = LLMService(
+        api_key=settings.cerebras_api_key,
+        cache_service=redis_cache_service,
+        cache_ttl_seconds=settings.cache_llm_ttl_seconds,
+    )
     medical_rag_agent = MedicalRAGAgent(
         embedder=rag_embedding_service,
         global_store_dir=Path(settings.rag_global_store_dir),
         patient_data_root=Path(settings.rag_patient_data_root),
         llm_service=llm_service,
+        cache_service=redis_cache_service,
+        retrieval_cache_ttl_seconds=settings.cache_retrieval_ttl_seconds,
     )
     
     # Initialize Phase 5 & 6 Agents — reuse the same llm_service instance already created above
@@ -104,6 +121,7 @@ async def lifespan(app: FastAPI):
     diagnostic_agent = DiagnosticAgent(llm_service=llm_service, extractor=numerical_extractor)
     explanation_service = ExplanationService(terminology_service=terminology_service)
     explainability_agent = ExplainabilityAgent(llm_service=llm_service, explanation_service=explanation_service)
+    hitl_review_service = HITLReviewService(patient_data_root=settings.rag_patient_data_root)
     
     # Initialize Phase 7 Pipeline Orchestrator
     medical_pipeline = MedicalPipeline(
@@ -111,7 +129,8 @@ async def lifespan(app: FastAPI):
         data_prep_agent=data_prep_agent,
         rag_agent=medical_rag_agent,
         diagnostic_agent=diagnostic_agent,
-        explainability_agent=explainability_agent
+        explainability_agent=explainability_agent,
+        hitl_review_service=hitl_review_service,
     )
     yield
     logger.info("Application shutting down")
@@ -161,6 +180,11 @@ def _require_pipeline() -> MedicalPipeline:
         raise HTTPException(status_code=503, detail="MedicalPipeline is not initialized.")
     return medical_pipeline
 
+def _require_hitl_review_service() -> HITLReviewService:
+    if hitl_review_service is None:
+        raise HTTPException(status_code=503, detail="HITLReviewService is not initialized.")
+    return hitl_review_service
+
 
 @app.post("/session/create", response_model=SessionCreateResponse, tags=["Session"])
 async def create_session() -> SessionCreateResponse:
@@ -187,6 +211,7 @@ async def analyze_medical_session(session_id: str) -> FinalDiagnosticReport:
     Privacy (Phase 2), Data Prep (Phase 3), RAG (Phase 4), Diagnosis (Phase 5), and Explainability (Phase 6).
     """
     pipeline = _require_pipeline()
+    review_service = _require_hitl_review_service()
     
     # Reconstruct the manifest from the staging directory logic
     # (In a real app, you'd load this from a DB or session store)
@@ -195,12 +220,73 @@ async def analyze_medical_session(session_id: str) -> FinalDiagnosticReport:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found or expired.")
         
     try:
+        review_status = review_service.get_status(session_id)
+        if review_status.status == "approved":
+            return await pipeline.finalize_after_hitl_approval(session_id=session_id)
+        if review_status.status == "rejected":
+            raise HTTPException(
+                status_code=409,
+                detail="Clinician review rejected this session. Re-run intake or start a new session for another analysis pass.",
+            )
+        if review_status.status == "pending_clinician_review":
+            payload = review_service.get_payload(session_id) or {}
+            diagnosis = StructuredDiagnosis.model_validate(payload.get("diagnosis", {}))
+            return FinalDiagnosticReport(
+                session_id=session_id,
+                clinician_brief="Awaiting clinician approval due to safety-triggered review conditions.",
+                patient_explanation="Your case is being reviewed by a clinician before the final AI summary is released.",
+                evidence_table=[],
+                citations=[],
+                structured_diagnosis=diagnosis,
+                review_status="pending_clinician_review",
+                hitl_review_id=review_status.review_id,
+                hitl_reasons=review_status.reasons,
+                clinician_review_notes=review_status.reviewer_notes,
+            )
         manifest = IntakeManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
         final_report = await pipeline.analyze_session(manifest)
         return final_report
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("analyze_session_failed", session_id=session_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+
+@app.get("/session/{session_id}/review", response_model=HITLReviewStatus, tags=["Session"])
+async def get_session_review_status(session_id: str) -> HITLReviewStatus:
+    review_service = _require_hitl_review_service()
+    return review_service.get_status(session_id=session_id)
+
+
+@app.post("/session/{session_id}/review/approve", response_model=FinalDiagnosticReport, tags=["Session"])
+async def approve_session_review(session_id: str, payload: HITLReviewActionRequest) -> FinalDiagnosticReport:
+    review_service = _require_hitl_review_service()
+    pipeline = _require_pipeline()
+    try:
+        review_service.approve(session_id=session_id, reviewer_id=payload.reviewer_id, notes=payload.notes)
+        return await pipeline.finalize_after_hitl_approval(session_id=session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("session_review_approve_failed", session_id=session_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Internal error while approving session review.")
+
+
+@app.post("/session/{session_id}/review/reject", response_model=HITLReviewStatus, tags=["Session"])
+async def reject_session_review(session_id: str, payload: HITLReviewActionRequest) -> HITLReviewStatus:
+    review_service = _require_hitl_review_service()
+    try:
+        return review_service.reject(session_id=session_id, reviewer_id=payload.reviewer_id, notes=payload.notes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("session_review_reject_failed", session_id=session_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Internal error while rejecting session review.")
 
 
 @app.post("/upload", response_model=MedicalDocumentSchema, tags=["Pipeline"])

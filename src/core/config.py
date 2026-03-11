@@ -24,6 +24,11 @@ class Settings(BaseSettings):
         default="postgresql://postgres:postgres@localhost:5432/mediflow",
         validation_alias="PGVECTOR_DATABASE_URL",
     )
+    redis_url: str = Field(default="", validation_alias="REDIS_URL")
+    cache_key_prefix: str = "mediflow"
+    cache_embedding_ttl_seconds: int = 7 * 24 * 60 * 60
+    cache_retrieval_ttl_seconds: int = 5 * 60
+    cache_llm_ttl_seconds: int = 30 * 60
     
     # Phase 5 LLM Settings/Cerebras
     cerebras_api_key: str = Field(default="", validation_alias="CEREBRAS_API_KEY")

@@ -19,6 +19,7 @@ from src.rag.embedding_service import EmbeddingService
 from src.rag.pgvector_store import PGVectorStore, TABLE_KNOWLEDGE, TABLE_PATIENT
 from src.rag.crag_graph import build_crag_graph
 from src.services.llm_service import LLMService
+from src.services.redis_cache_service import RedisCacheService
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -35,6 +36,8 @@ class MedicalRAGAgent(BaseAgent):
         patient_data_root: Path = PATIENT_DATA_ROOT,
         db_url: Optional[str] = None,
         llm_service: Optional[LLMService] = None,
+        cache_service: Optional[RedisCacheService] = None,
+        retrieval_cache_ttl_seconds: int = 300,
     ) -> None:
         super().__init__("MedicalRAGAgent")
         self.embedder = embedder
@@ -59,6 +62,8 @@ class MedicalRAGAgent(BaseAgent):
                 global_store=self.global_store,
                 get_patient_store_fn=self._get_patient_store,
                 llm_service=llm_service,
+                cache_service=cache_service,
+                retrieval_cache_ttl_seconds=retrieval_cache_ttl_seconds,
             )
             self.logger.info("crag_graph_enabled", msg="CRAG StateGraph active for retrieval.")
         else:

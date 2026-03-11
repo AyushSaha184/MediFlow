@@ -34,6 +34,7 @@ The graph returns a dict with keys:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -122,7 +123,14 @@ def _apply_decay(
 
 # ── Graph factory ─────────────────────────────────────────────────────────────
 
-def build_crag_graph(embedder, global_store, get_patient_store_fn, llm_service):
+def build_crag_graph(
+    embedder,
+    global_store,
+    get_patient_store_fn,
+    llm_service,
+    cache_service=None,
+    retrieval_cache_ttl_seconds: int = 300,
+):
     """
     Constructs and compiles the CRAG StateGraph.
 
@@ -157,24 +165,65 @@ def build_crag_graph(embedder, global_store, get_patient_store_fn, llm_service):
             rewrite_count=state.get("rewrite_count", 0),
         )
 
+        patient_store = get_patient_store_fn(session_id) if session_id else None
+        patient_count = patient_store._count() if patient_store else 0
+        global_count = global_store._count()
+
+        cache_key = ""
+        if cache_service is not None and retrieval_cache_ttl_seconds > 0:
+            query_hash = hashlib.sha256(" ".join(query.strip().split()).encode("utf-8")).hexdigest()
+            sid = session_id or "none"
+            cache_key = (
+                f"ret:v2:session:{sid}:query:{query_hash}:"
+                f"kp:{top_k_patient}:kg:{top_k_global}:"
+                f"pc:{patient_count}:gc:{global_count}"
+            )
+            cached_payload = cache_service.get_json(cache_key)
+            if isinstance(cached_payload, list):
+                cached_hits: list[tuple[float, Dict[str, Any]]] = []
+                for row in cached_payload:
+                    if not isinstance(row, dict):
+                        continue
+                    if "distance" not in row or "metadata" not in row:
+                        continue
+                    try:
+                        distance = float(row["distance"])
+                    except Exception:
+                        continue
+                    metadata = row.get("metadata")
+                    if isinstance(metadata, dict):
+                        cached_hits.append((distance, metadata))
+                if cached_hits:
+                    logger.info(
+                        "crag_retrieve_cache_hit",
+                        session_id=session_id,
+                        rewrite_count=state.get("rewrite_count", 0),
+                        hits=len(cached_hits),
+                    )
+                    return {**state, "raw_hits": cached_hits}
+
         q_vec = embedder.embed_text(query)
         raw: list[tuple[float, Dict]] = []
 
-        if session_id:
-            patient_store = get_patient_store_fn(session_id)
-            if patient_store and patient_store._count() > 0:
-                patient_hits = patient_store.search(
-                    q_vec,
-                    k=top_k_patient,
-                    metadata_filter={"session_id": session_id},
-                )
-                raw.extend(patient_hits)
+        if patient_store and patient_count > 0:
+            patient_hits = patient_store.search(
+                q_vec,
+                k=top_k_patient,
+                metadata_filter={"session_id": session_id},
+            )
+            raw.extend(patient_hits)
 
-        if global_store._count() > 0:
+        if global_count > 0:
             global_hits = global_store.search(q_vec, k=top_k_global)
             raw.extend(global_hits)
 
         raw = _apply_decay(raw)
+        if cache_key and cache_service is not None and raw:
+            cache_payload = [
+                {"distance": float(distance), "metadata": metadata}
+                for distance, metadata in raw
+            ]
+            cache_service.set_json(cache_key, cache_payload, ttl_seconds=retrieval_cache_ttl_seconds)
 
         return {**state, "raw_hits": raw}
 

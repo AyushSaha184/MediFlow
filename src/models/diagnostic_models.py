@@ -70,3 +70,33 @@ class FinalDiagnosticReport(BaseModel):
         description="Hard-coded medical legal safety disclaimer."
     )
     structured_diagnosis: StructuredDiagnosis = Field(description="The underlying Phase 5 mathematical/structured diagnosis output.")
+    review_status: Literal["completed", "pending_clinician_review", "rejected_by_clinician"] = Field(
+        default="completed",
+        description="Human review status for this report lifecycle.",
+    )
+    hitl_review_id: Optional[str] = Field(
+        default=None,
+        description="Review record ID when clinician review is required.",
+    )
+    hitl_reasons: List[str] = Field(
+        default_factory=list,
+        description="Reasons that triggered clinician review.",
+    )
+    clinician_review_notes: Optional[str] = Field(
+        default=None,
+        description="Optional reviewer notes captured during HITL approval/rejection.",
+    )
+
+
+class HITLReviewStatus(BaseModel):
+    session_id: str
+    status: Literal["none", "pending_clinician_review", "approved", "rejected"]
+    review_id: Optional[str] = None
+    reasons: List[str] = Field(default_factory=list)
+    reviewer_id: Optional[str] = None
+    reviewer_notes: Optional[str] = None
+
+
+class HITLReviewActionRequest(BaseModel):
+    reviewer_id: str = Field(..., min_length=1, description="Unique reviewer identifier.")
+    notes: Optional[str] = Field(default=None, description="Optional reviewer notes.")

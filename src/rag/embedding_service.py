@@ -7,7 +7,8 @@ Uses SentenceTransformers to encode medical text into uniform semantic vectors.
 
 from __future__ import annotations
 
-from typing import List, Sequence
+import hashlib
+from typing import List, Optional, Sequence
 
 import httpx
 import numpy as np
@@ -19,6 +20,7 @@ except Exception:  # pragma: no cover - optional import path on limited envs
     SentenceTransformer = None  # type: ignore[assignment]
 
 from src.utils.logger import get_logger
+from src.services.redis_cache_service import RedisCacheService
 
 logger = get_logger(__name__)
 
@@ -115,6 +117,8 @@ class EmbeddingService:
         nvidia_truncate: str = "NONE",
         request_timeout_seconds: float = 60.0,
         nvidia_max_batch_size: int = 32,
+        cache_service: Optional[RedisCacheService] = None,
+        cache_ttl_seconds: int = 7 * 24 * 60 * 60,
     ):
         """
         Initializes the embedding service with a provider backend.
@@ -125,6 +129,8 @@ class EmbeddingService:
         self.backend_name = ""
         self.model_name = model_name
         self.provider = provider
+        self.cache_service = cache_service
+        self.cache_ttl_seconds = cache_ttl_seconds
 
         try:
             if self.provider == "nvidia_api":
@@ -189,6 +195,19 @@ class EmbeddingService:
         norms[norms == 0.0] = 1.0
         return (vectors / norms).astype(np.float32)
 
+    @staticmethod
+    def _normalize_cache_text(text: str) -> str:
+        # Normalize only surrounding/repeated whitespace to keep semantics stable.
+        return " ".join((text or "").strip().split())
+
+    def _embedding_cache_key(self, text: str) -> str:
+        normalized = self._normalize_cache_text(text)
+        text_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        return (
+            f"emb:v1:provider:{self.provider}:backend:{self.backend_name}:"
+            f"model:{self.model_name}:dim:{self.dimension}:text:{text_hash}"
+        )
+
     def embed_text(self, text: str) -> np.ndarray:
         """
         Embeds a single string into a 1D numpy array.
@@ -206,10 +225,54 @@ class EmbeddingService:
 
         safe_texts = [text if isinstance(text, str) else str(text) for text in texts]
 
-        if self.backend_name == "sentence_transformer":
-            embeddings = self.model.encode(safe_texts, convert_to_numpy=True, show_progress_bar=False)
-        else:
-            embeddings = self.model.encode(safe_texts)
+        cache = self.cache_service
+        if cache is None:
+            if self.backend_name == "sentence_transformer":
+                embeddings = self.model.encode(safe_texts, convert_to_numpy=True, show_progress_bar=False)
+            else:
+                embeddings = self.model.encode(safe_texts)
+            vectors = embeddings.astype(np.float32)
+            return self._normalize_rows(vectors)
 
-        vectors = embeddings.astype(np.float32)
-        return self._normalize_rows(vectors)
+        rows: list[np.ndarray | None] = [None] * len(safe_texts)
+        misses: list[str] = []
+        miss_indices: list[int] = []
+        miss_keys: list[str] = []
+
+        for idx, text in enumerate(safe_texts):
+            key = self._embedding_cache_key(text)
+            cached = cache.get_json(key)
+            if (
+                isinstance(cached, list)
+                and len(cached) == self.dimension
+            ):
+                try:
+                    rows[idx] = np.asarray(cached, dtype=np.float32)
+                    continue
+                except Exception:
+                    pass
+            misses.append(text)
+            miss_indices.append(idx)
+            miss_keys.append(key)
+
+        if misses:
+            if self.backend_name == "sentence_transformer":
+                uncached = self.model.encode(misses, convert_to_numpy=True, show_progress_bar=False)
+            else:
+                uncached = self.model.encode(misses)
+
+            normalized_uncached = self._normalize_rows(uncached.astype(np.float32))
+            for offset, row_idx in enumerate(miss_indices):
+                vector = normalized_uncached[offset]
+                rows[row_idx] = vector
+                cache.set_json(
+                    miss_keys[offset],
+                    vector.tolist(),
+                    ttl_seconds=self.cache_ttl_seconds,
+                )
+
+        output = np.vstack([
+            row if row is not None else np.zeros((self.dimension,), dtype=np.float32)
+            for row in rows
+        ]).astype(np.float32)
+        return output

@@ -336,7 +336,10 @@ class MedicalRAGAgent(BaseAgent):
             deleted_count = cached.delete_all()
         else:
             store = PGVectorStore.load_local(
-                str(store_path), dimension=self.embedder.dimension, db_url=self._db_url
+                str(store_path),
+                dimension=self.embedder.dimension,
+                table_name=TABLE_PATIENT,
+                db_url=self._db_url,
             )
             deleted_count = store.delete_all()
 

@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import asyncio
+from contextlib import suppress
 import httpx
 import os
 import shutil
@@ -67,6 +69,8 @@ explainability_agent: ExplainabilityAgent = None
 medical_pipeline: MedicalPipeline = None
 hitl_review_service: HITLReviewService = None
 redis_cache_service: RedisCacheService = None
+active_analysis_tasks: dict[str, asyncio.Task] = {}
+analysis_tasks_lock = asyncio.Lock()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -186,6 +190,39 @@ def _require_hitl_review_service() -> HITLReviewService:
     return hitl_review_service
 
 
+async def _register_analysis_task(session_id: str, task: asyncio.Task) -> bool:
+    async with analysis_tasks_lock:
+        existing = active_analysis_tasks.get(session_id)
+        if existing is not None and not existing.done():
+            return False
+        active_analysis_tasks[session_id] = task
+        return True
+
+
+async def _unregister_analysis_task(session_id: str, task: asyncio.Task) -> None:
+    async with analysis_tasks_lock:
+        current = active_analysis_tasks.get(session_id)
+        if current is task:
+            active_analysis_tasks.pop(session_id, None)
+
+
+async def _cancel_active_analysis(session_id: str) -> None:
+    task: asyncio.Task | None = None
+    async with analysis_tasks_lock:
+        existing = active_analysis_tasks.get(session_id)
+        if existing is not None and not existing.done():
+            task = existing
+            active_analysis_tasks.pop(session_id, None)
+
+    if task is None:
+        return
+
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+    logger.info("analysis_task_cancelled", session_id=session_id)
+
+
 @app.post("/session/create", response_model=SessionCreateResponse, tags=["Session"])
 async def create_session() -> SessionCreateResponse:
     """
@@ -244,8 +281,21 @@ async def analyze_medical_session(session_id: str) -> FinalDiagnosticReport:
                 clinician_review_notes=review_status.reviewer_notes,
             )
         manifest = IntakeManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
-        final_report = await pipeline.analyze_session(manifest)
+        analysis_task = asyncio.create_task(pipeline.analyze_session(manifest))
+        if not await _register_analysis_task(session_id, analysis_task):
+            analysis_task.cancel()
+            raise HTTPException(
+                status_code=409,
+                detail="Analysis is already running for this session.",
+            )
+        try:
+            final_report = await analysis_task
+        finally:
+            await _unregister_analysis_task(session_id, analysis_task)
         return final_report
+    except asyncio.CancelledError:
+        logger.warning("analyze_session_cancelled", session_id=session_id)
+        raise HTTPException(status_code=409, detail="Analysis cancelled because session was cleaned up/refreshed.")
     except HTTPException:
         raise
     except Exception as e:
@@ -525,6 +575,9 @@ async def delete_session(session_id: str) -> RAGCleanupResponse:
     on page unload via navigator.sendBeacon.
     """
     try:
+        # 0. Cancel in-flight analysis first so refresh/exit halts processing.
+        await _cancel_active_analysis(session_id=session_id)
+
         # 1. Remove pgvector rows
         rag_agent = _require_rag_agent()
         deleted = rag_agent.cleanup_session(session_id=session_id)

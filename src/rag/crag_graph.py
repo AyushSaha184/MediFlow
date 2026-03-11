@@ -84,6 +84,25 @@ def _format_hit(distance: float, metadata: Dict[str, Any]) -> Dict[str, Any]:
     document_id = str(normalized.get("document_id") or "")
     session_id = normalized.get("session_id")
     metadata_payload = normalized.get("metadata") or {}
+    if not isinstance(metadata_payload, dict):
+        metadata_payload = {}
+    for kb_field in (
+        "canonical_id",
+        "source_tier",
+        "source_type",
+        "evidence_level",
+        "published_at",
+        "last_reviewed_at",
+        "superseded",
+        "specialty",
+        "jurisdiction",
+        "issuer",
+        "pmid",
+        "doi",
+        "topic",
+    ):
+        if kb_field in normalized and kb_field not in metadata_payload:
+            metadata_payload[kb_field] = normalized[kb_field]
     return {
         "chunk_id": chunk_id,
         "document_id": document_id,
@@ -101,10 +120,16 @@ def _format_hit(distance: float, metadata: Dict[str, Any]) -> Dict[str, Any]:
 def _apply_decay(
     raw_hits: List[tuple[float, Dict[str, Any]]],
 ) -> list[tuple[float, Dict[str, Any]]]:
-    """Temporal decay weighting — same logic as the old MedicalRAGAgent.retrieve()."""
+    """
+    Ranking adjustments:
+      - temporal decay for patient history
+      - source tier/evidence boosts for global literature
+      - superseded penalty
+    """
     from datetime import datetime
     weighted = []
     for distance, metadata in raw_hits:
+        normalized = flatten_record(metadata)
         ts_str = metadata.get("metadata", {}).get("document_timestamp")
         penalty = 1.0
         if ts_str and ts_str != "Historical":
@@ -116,6 +141,23 @@ def _apply_decay(
                     penalty = 1.0 + min(0.5, (days_old / 30.0) * 0.05)
             except Exception:
                 penalty = 1.2
+
+        source_tier = str(normalized.get("source_tier") or "")
+        if source_tier == "authoritative":
+            penalty *= 0.95
+        elif source_tier == "evidence":
+            penalty *= 0.98
+
+        evidence_level = str(normalized.get("evidence_level") or "").upper()
+        if evidence_level == "A":
+            penalty *= 0.97
+        elif evidence_level == "B":
+            penalty *= 0.99
+
+        superseded = normalized.get("superseded")
+        if str(superseded).lower() == "true":
+            penalty *= 1.15
+
         weighted.append((distance * penalty, metadata))
     weighted.sort(key=lambda x: x[0])
     return weighted
@@ -363,6 +405,7 @@ def build_crag_graph(
         hits: List[Any], top_k_total: int
     ) -> List[Dict[str, Any]]:
         seen = set()
+        seen_canonical = set()
         final = []
         for item in hits:
             # hits can be (distance, metadata) tuples or already-formatted dicts
@@ -374,7 +417,12 @@ def build_crag_graph(
 
             if formatted["chunk_id"] in seen:
                 continue
+            canonical_id = str((formatted.get("metadata") or {}).get("canonical_id") or "")
+            if canonical_id and canonical_id in seen_canonical:
+                continue
             seen.add(formatted["chunk_id"])
+            if canonical_id:
+                seen_canonical.add(canonical_id)
             final.append(formatted)
             if len(final) >= top_k_total:
                 break

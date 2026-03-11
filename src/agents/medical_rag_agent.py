@@ -185,6 +185,23 @@ class MedicalRAGAgent(BaseAgent):
         session_id = normalized.get("session_id")
         payload_meta = normalized.get("metadata")
         metadata_payload = payload_meta if isinstance(payload_meta, dict) else {}
+        for kb_field in (
+            "canonical_id",
+            "source_tier",
+            "source_type",
+            "evidence_level",
+            "published_at",
+            "last_reviewed_at",
+            "superseded",
+            "specialty",
+            "jurisdiction",
+            "issuer",
+            "pmid",
+            "doi",
+            "topic",
+        ):
+            if kb_field in normalized and kb_field not in metadata_payload:
+                metadata_payload[kb_field] = normalized[kb_field]
 
         return {
             "chunk_id": chunk_id,
@@ -311,11 +328,17 @@ class MedicalRAGAgent(BaseAgent):
 
         final_chunks: List[Dict[str, Any]] = []
         seen: set = set()
+        seen_canonical: set = set()
         for distance, metadata in weighted:
             fmt = self._format_retrieval_hit(distance, metadata)
             if fmt["chunk_id"] in seen:
                 continue
+            canonical_id = str((fmt.get("metadata") or {}).get("canonical_id") or "")
+            if canonical_id and canonical_id in seen_canonical:
+                continue
             seen.add(fmt["chunk_id"])
+            if canonical_id:
+                seen_canonical.add(canonical_id)
             final_chunks.append(fmt)
             if len(final_chunks) >= top_k_total:
                 break

@@ -12,7 +12,7 @@ if (API_BASE) {
 // â”€â”€ Status badge styles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const statusStyles = {
   Analyzed:  "text-emerald-400",
-  Scrubbed:  "text-sky-400",
+  Uploaded:  "text-sky-400",
   Scanning:  "text-amber-300",
   Uploading: "text-violet-300",
   Error:     "text-rose-400",
@@ -36,7 +36,10 @@ function App() {
   const [isAnalyzing, setIsAnalyzing]                = useState(false);
   const [error, setError]                            = useState(null);
   const [warning, setWarning]                        = useState(null);
+  const [showBugHelp, setShowBugHelp]                = useState(false);
   const hasUploadedFiles                             = statusRows.length > 0;
+  const analysisCompleted                            = Boolean(report);
+  const analysisStarted                              = isAnalyzing || analysisCompleted;
 
   // â”€â”€ Session lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
@@ -80,6 +83,10 @@ function App() {
     const allFiles = Array.from(event.target.files ?? []);
     event.target.value = "";
     if (!allFiles.length || !sessionId) return;
+    if (analysisCompleted) {
+      setWarning("Analysis is already completed for this session. Refresh the page to start a new session.");
+      return;
+    }
 
     setError(null);
     setWarning(null);
@@ -113,11 +120,11 @@ function App() {
       // Track successfully uploaded file names for duplicate detection
       files.forEach((f) => uploadedFileNamesRef.current.add(f.name));
 
-      // Mark uploaded files as Scrubbed (privacy scan ran inside intake)
+      // Mark uploaded files as Uploaded (privacy scan ran inside intake)
       setStatusRows((prev) =>
         prev.map((row) =>
           newRows.some((n) => n.fileName === row.fileName && row.status === "Scanning")
-            ? { ...row, status: "Scrubbed" }
+            ? { ...row, status: "Uploaded" }
             : row
         )
       );
@@ -143,6 +150,7 @@ function App() {
 
   // Clear all rows + diagnosis: wipe DB/bucket for this session, start fresh session
   const handleClearAll = async () => {
+    if (analysisStarted) return;
     const sid = sessionIdRef.current;
     setStatusRows([]);
     setReport(null);
@@ -166,6 +174,10 @@ function App() {
   // â”€â”€ Start analysis â†’ /analyze-medical-session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleStartAnalysis = async () => {
     if (!sessionId || isUploading) return;
+    if (analysisCompleted) {
+      setWarning("Analysis is already completed for this session. Refresh the page to run a new analysis.");
+      return;
+    }
     setError(null);
     setIsAnalyzing(true);
 
@@ -174,7 +186,7 @@ function App() {
       setReport(res.data);
       setStatusRows((prev) =>
         prev.map((row) =>
-          row.status === "Scrubbed" ? { ...row, status: "Analyzed" } : row
+          row.status === "Uploaded" ? { ...row, status: "Analyzed" } : row
         )
       );
     } catch (err) {
@@ -208,6 +220,31 @@ function App() {
       <header className="fixed inset-x-0 top-0 z-20 h-14 border-b border-slate-700/60 bg-slate-900/95 px-5">
         <div className="flex h-full items-center justify-between">
           <span className="text-sm font-semibold tracking-[0.22em] text-amber-300">MEDIFLOW AI</span>
+          <div
+            className="relative"
+            onMouseEnter={() => setShowBugHelp(true)}
+            onMouseLeave={() => setShowBugHelp(false)}
+          >
+            <a
+              href="mailto:ayushsaha1884@gmail.com?subject=MediFlow%20Bug%20Report"
+              className="inline-flex items-center gap-1.5 rounded-full border border-slate-500/60 bg-slate-800/80 px-3 py-1 text-sm font-medium text-slate-100 transition hover:border-amber-300 hover:text-amber-200"
+            >
+              <AlertTriangle size={14} />
+              Report Bug
+            </a>
+            {showBugHelp && (
+              <div className="absolute right-0 mt-2 w-64 rounded-2xl border border-slate-600/60 bg-slate-900/95 px-4 py-3 text-sm text-slate-200 shadow-xl">
+                Please report the bug{" "}
+                <a
+                  href="mailto:ayushsaha1884@gmail.com?subject=MediFlow%20Bug%20Report"
+                  className="text-amber-300 underline"
+                >
+                  here
+                </a>{" "}
+                with screenshots.
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -227,7 +264,7 @@ function App() {
             <div className="mb-3 flex items-center justify-between gap-2">
               <h2 className="text-lg font-semibold tracking-wide text-slate-200">Upload</h2>
               <div className="flex items-center gap-2">
-                {hasUploadedFiles && (
+                {hasUploadedFiles && !analysisStarted && (
                   <button
                     type="button"
                     onClick={handleClearAll}
@@ -242,17 +279,29 @@ function App() {
                 <button
                   type="button"
                   onClick={handleStartAnalysis}
-                  disabled={isAnalyzing || isUploading || !hasUploadedFiles}
+                  disabled={analysisStarted || isUploading || !hasUploadedFiles}
                   className="inline-flex items-center gap-2 rounded-md bg-amber-400 px-3 py-1.5 text-xs font-semibold text-slate-900 transition hover:bg-amber-300 disabled:opacity-50"
                 >
                   <Play size={14} />
-                  {isAnalyzing ? "Analyzing..." : "Start Analysis"}
+                  {isAnalyzing ? "Analyzing..." : analysisCompleted ? "Analysis Complete" : "Start Analysis"}
                 </button>
               </div>
             </div>
 
             {/* Drop zone */}
-            <label className="mb-4 flex h-48 cursor-pointer flex-col items-center justify-center rounded-xl border border-slate-500/80 bg-slate-900/30 text-center transition hover:border-amber-300 hover:bg-slate-900/50">
+            <label
+              onClick={(e) => {
+                if (analysisCompleted) {
+                  e.preventDefault();
+                  setWarning("This session is locked after analysis. Refresh the page to upload again.");
+                }
+              }}
+              className={`mb-4 flex h-48 flex-col items-center justify-center rounded-xl border border-slate-500/80 bg-slate-900/30 text-center transition ${
+                analysisCompleted
+                  ? "cursor-not-allowed opacity-60"
+                  : "cursor-pointer hover:border-amber-300 hover:bg-slate-900/50"
+              }`}
+            >
               <FolderOpen size={72} className="mb-2 text-slate-200" />
               <span className="text-xl font-medium tracking-wide text-amber-300">
                 {isUploading ? "Uploadingâ€¦" : "Upload Documents"}
@@ -262,7 +311,7 @@ function App() {
                 type="file"
                 className="hidden"
                 multiple
-                disabled={isUploading}
+                disabled={isUploading || analysisCompleted}
                 accept=".zip,.dcm,.dicom,.pdf,.jpg,.jpeg,.png"
                 onChange={handleFileUpload}
               />

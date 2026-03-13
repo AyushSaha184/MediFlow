@@ -206,7 +206,7 @@ MediFlow's RAG layer uses a **LangGraph `StateGraph`** instead of a single retri
 │   ├── pipelines/
 │   │   └── medical_pipeline.py     # Phase 7 Master Orchestrator: wires all agents; retry policy
 │   ├── rag/
-│   │   ├── embedding_service.py    # Provider-agnostic embedder: NVIDIA API / SentenceTransformers / hashing fallback
+│   │   ├── embedding_service.py    # NVIDIA API embedder for clinical RAG vectors
 │   │   ├── pgvector_store.py       # PostgreSQL + pgvector vector store; dual-table architecture
 │   │   ├── crag_graph.py           # LangGraph CRAG StateGraph: retrieve → grade → rewrite loop
 │   │   ├── ingest_global.py        # CLI: ingests data/knowledge_base/ into mediflow_knowledge table
@@ -412,7 +412,7 @@ MedicalPipeline.analyze_session()
      │                        ↓  List[MedicalDocumentSchema]  (enriched + chunked)
      │
      ├─ Phase 4 ──▶ MedicalRAGAgent
-     │                ├─ EmbeddingService  (NVIDIA API / SentenceTransformers / hashing)
+     │                ├─ EmbeddingService  (NVIDIA API)
      │                ├─ PGVectorStore — mediflow_knowledge  (global clinical literature)
      │                └─ PGVectorStore — mediflow_patient_vectors  (session-scoped)
      │                     └─ CRAG StateGraph  (retrieve → grade → rewrite → flag)
@@ -521,7 +521,7 @@ Graph output: `{"results": [...], "low_confidence": bool, "rewrite_count": int}`
 
 | Component | File | Responsibility |
 |---|---|---|
-| **EmbeddingService** | `src/rag/embedding_service.py` | NVIDIA API embedder + SentenceTransformers + hashing fallback; batched requests |
+| **EmbeddingService** | `src/rag/embedding_service.py` | NVIDIA API embedder; batched requests |
 | **PGVectorStore** | `src/rag/pgvector_store.py` | pgvector-backed store; dual-table (knowledge / patient); FAISS-compatible interface |
 | **CRAG Graph** | `src/rag/crag_graph.py` | LangGraph StateGraph: embed → grade → rewrite → flag low confidence |
 | **LLMService** | `src/services/llm_service.py` | Cerebras Cloud SDK; JSON-mode structured generation; temperature-controlled passes |
@@ -638,7 +638,7 @@ If you see `metadata_drift_detected` in logs, a file in the batch had a differen
 
 **OOM on Render Starter**
 
-The Docker image uses `en_core_web_sm` and NVIDIA API embeddings (no local model weights) to stay within ~512 MB RAM. If memory still exceeds limits, reduce `rag_embedding_nvidia_max_batch_size` (default: 32) and ensure `requirements.txt` does not include `torch` or `sentence-transformers` for the production deployment.
+The Docker image uses `en_core_web_sm` and NVIDIA API embeddings (no local model weights) to stay within ~512 MB RAM. If memory still exceeds limits, reduce `rag_embedding_nvidia_max_batch_size` (default: 32).
 
 ## License
 

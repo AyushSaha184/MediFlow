@@ -96,8 +96,6 @@ async def lifespan(app: FastAPI):
     rag_embedding_service = EmbeddingService(
         provider=settings.rag_embedding_provider,
         model_name=settings.rag_embedding_model_name,
-        fallback_dimension=settings.rag_embedding_fallback_dimension,
-        local_files_only=settings.rag_embedding_local_files_only,
         nvidia_api_url=settings.rag_embedding_nvidia_api_url,
         nvidia_api_key=settings.rag_embedding_nvidia_api_key,
         nvidia_truncate=settings.rag_embedding_nvidia_truncate,

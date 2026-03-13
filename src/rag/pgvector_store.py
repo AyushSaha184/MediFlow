@@ -12,6 +12,7 @@ need an import-level change.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -79,6 +80,7 @@ class PGVectorStore:
         self.required_metadata_keys = required_metadata_keys or set()
         self._conn = self._connect()
         self._ensure_schema()
+        self._ensure_embedding_dimension_match()
         self.index = _IndexProxy(self._count)
 
     # ── Connection helpers ────────────────────────────────────────────────────
@@ -145,6 +147,52 @@ class PGVectorStore:
                     f"CREATE INDEX IF NOT EXISTS idx_{tbl}_created_at "
                     f"ON {tbl}(created_at);"
                 )
+
+    def _table_embedding_dimension(self) -> Optional[int]:
+        """
+        Return the configured pgvector dimension for the table's `embedding`
+        column, or None if it cannot be resolved.
+        """
+        with self._get_cursor() as cur:
+            cur.execute(
+                """
+                SELECT format_type(a.atttypid, a.atttypmod) AS embedding_type
+                FROM pg_attribute a
+                JOIN pg_class c ON a.attrelid = c.oid
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                WHERE n.nspname = current_schema()
+                  AND c.relname = %s
+                  AND a.attname = 'embedding'
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+                LIMIT 1
+                """,
+                (self._table_name,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        embedding_type = str(row.get("embedding_type") or "")
+        match = re.search(r"vector\((\d+)\)", embedding_type)
+        if not match:
+            return None
+        return int(match.group(1))
+
+    def _ensure_embedding_dimension_match(self) -> None:
+        table_dim = self._table_embedding_dimension()
+        if table_dim is None:
+            return
+        if table_dim == self.dimension:
+            return
+
+        raise RuntimeError(
+            (
+                f"pgvector dimension mismatch on table `{self._table_name}`: "
+                f"table uses vector({table_dim}) but embedder uses {self.dimension}. "
+                "Use a matching embedding model, or recreate/migrate the table to "
+                "the new dimension before ingesting."
+            )
+        )
 
     def _count(self) -> int:
         with self._get_cursor() as cur:

@@ -10,9 +10,7 @@ class Settings(BaseSettings):
     environment: str = "dev"
     log_level: str = "INFO"
     rag_embedding_provider: str = "nvidia_api"
-    rag_embedding_model_name: str = "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1"
-    rag_embedding_fallback_dimension: int = 384
-    rag_embedding_local_files_only: bool = True
+    rag_embedding_model_name: str = "baai/bge-m3"
     rag_embedding_nvidia_api_url: str = "https://integrate.api.nvidia.com/v1/embeddings"
     rag_embedding_nvidia_api_key: str = Field(default="", validation_alias="NVIDIA_EMBED_API_KEY")
     rag_embedding_nvidia_truncate: str = "NONE"
@@ -31,6 +29,8 @@ class Settings(BaseSettings):
     cache_llm_ttl_seconds: int = 30 * 60
     kb_guideline_manifest_path: str = "data/knowledge_base/guidelines_manifest.json"
     kb_enable_pubmed: bool = False
+    kb_embedding_provider: str = ""
+    kb_embedding_model_name: str = ""
     kb_pubmed_email: str = ""
     kb_pubmed_api_key: str = Field(default="", validation_alias="NCBI_API_KEY")
     kb_pubmed_max_results: int = 50

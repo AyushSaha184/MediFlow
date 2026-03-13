@@ -222,16 +222,23 @@ def run_ingestion() -> Dict[str, int]:
         logger.warning("knowledge_base_missing", path=str(kb_path), msg="Continuing with PubMed-only source.")
 
     chunker = ChunkingService(target_chunk_size=1000, overlap=150)
+    kb_provider = settings.kb_embedding_provider.strip() or settings.rag_embedding_provider
+    kb_model_name = settings.kb_embedding_model_name.strip() or settings.rag_embedding_model_name
+
     embedder = EmbeddingService(
-        provider=settings.rag_embedding_provider,
-        model_name=settings.rag_embedding_model_name,
-        fallback_dimension=settings.rag_embedding_fallback_dimension,
-        local_files_only=settings.rag_embedding_local_files_only,
+        provider=kb_provider,
+        model_name=kb_model_name,
         nvidia_api_url=settings.rag_embedding_nvidia_api_url,
         nvidia_api_key=settings.rag_embedding_nvidia_api_key,
         nvidia_truncate=settings.rag_embedding_nvidia_truncate,
         request_timeout_seconds=settings.rag_embedding_request_timeout_seconds,
         nvidia_max_batch_size=settings.rag_embedding_nvidia_max_batch_size,
+    )
+    logger.info(
+        "global_ingestion_embedding_config",
+        provider=kb_provider,
+        model=kb_model_name,
+        dimension=embedder.dimension,
     )
 
     store = PGVectorStore.load_local(GLOBAL_STORE_DIR, dimension=embedder.dimension, table_name=TABLE_KNOWLEDGE)

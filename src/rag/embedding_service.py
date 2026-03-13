@@ -2,7 +2,7 @@
 src/rag/embedding_service.py
 ----------------------------
 Handles the generation of dense vector embeddings for text chunks.
-Uses SentenceTransformers to encode medical text into uniform semantic vectors.
+Uses NVIDIA Integrate API to encode medical text into semantic vectors.
 """
 
 from __future__ import annotations
@@ -12,37 +12,11 @@ from typing import List, Optional, Sequence
 
 import httpx
 import numpy as np
-from sklearn.feature_extraction.text import HashingVectorizer
-
-try:
-    from sentence_transformers import SentenceTransformer
-except Exception:  # pragma: no cover - optional import path on limited envs
-    SentenceTransformer = None  # type: ignore[assignment]
 
 from src.utils.logger import get_logger
 from src.services.redis_cache_service import RedisCacheService
 
 logger = get_logger(__name__)
-
-
-class _HashingFallbackEmbedder:
-    """
-    Deterministic offline embedder fallback using hashing features.
-    """
-
-    def __init__(self, dimension: int) -> None:
-        self.dimension = dimension
-        self.vectorizer = HashingVectorizer(
-            n_features=dimension,
-            alternate_sign=False,
-            norm=None,
-            lowercase=True,
-            ngram_range=(1, 2),
-        )
-
-    def encode(self, texts: Sequence[str]) -> np.ndarray:
-        matrix = self.vectorizer.transform(texts)
-        return matrix.astype(np.float32).toarray()
 
 
 class _NVIDIAAPIEmbedder:
@@ -108,10 +82,8 @@ class _NVIDIAAPIEmbedder:
 class EmbeddingService:
     def __init__(
         self,
-        model_name: str = "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1",
+        model_name: str = "baai/bge-m3",
         provider: str = "nvidia_api",
-        fallback_dimension: int = 384,
-        local_files_only: bool = True,
         nvidia_api_url: str = "https://integrate.api.nvidia.com/v1/embeddings",
         nvidia_api_key: str = "",
         nvidia_truncate: str = "NONE",
@@ -121,10 +93,7 @@ class EmbeddingService:
         cache_ttl_seconds: int = 7 * 24 * 60 * 60,
     ):
         """
-        Initializes the embedding service with a provider backend.
-        Supported providers:
-          - nvidia_api
-          - sentence_transformer
+        Initializes the embedding service with NVIDIA Integrate API.
         """
         self.backend_name = ""
         self.model_name = model_name
@@ -132,62 +101,37 @@ class EmbeddingService:
         self.cache_service = cache_service
         self.cache_ttl_seconds = cache_ttl_seconds
 
-        try:
-            if self.provider == "nvidia_api":
-                logger.info(
-                    "loading_embedding_model",
-                    provider=self.provider,
-                    model_name=model_name,
-                    api_url=nvidia_api_url,
-                )
-                self.model = _NVIDIAAPIEmbedder(
-                    api_url=nvidia_api_url,
-                    api_key=nvidia_api_key,
-                    model_name=model_name,
-                    truncate=nvidia_truncate,
-                    timeout_seconds=request_timeout_seconds,
-                    max_batch_size=nvidia_max_batch_size,
-                )
-                probe = self.model.encode(["embedding_dimension_probe"])
-                self.dimension = int(probe.shape[1])
-                self.backend_name = "nvidia_api"
-            elif self.provider == "sentence_transformer":
-                if SentenceTransformer is None:
-                    raise RuntimeError("sentence-transformers package is unavailable")
-                logger.info(
-                    "loading_embedding_model",
-                    provider=self.provider,
-                    model_name=model_name,
-                    local_files_only=local_files_only,
-                )
-                self.model = SentenceTransformer(model_name, local_files_only=local_files_only)
-                self.dimension = self.model.get_sentence_embedding_dimension()
-                self.backend_name = "sentence_transformer"
-            else:
-                raise RuntimeError(f"Unsupported embedding provider: {self.provider}")
+        if self.provider != "nvidia_api":
+            raise RuntimeError(
+                f"Unsupported embedding provider: {self.provider}. "
+                "MediFlow is configured for NVIDIA embeddings only."
+            )
 
-            logger.info(
-                "embedding_model_loaded",
-                backend=self.backend_name,
-                provider=self.provider,
-                model_name=model_name,
-                dimension=self.dimension,
-            )
-        except Exception as exc:
-            logger.warning(
-                "embedding_model_load_failed_fallback_enabled",
-                provider=self.provider,
-                model_name=model_name,
-                error=str(exc),
-            )
-            self.model = _HashingFallbackEmbedder(dimension=fallback_dimension)
-            self.dimension = fallback_dimension
-            self.backend_name = "hashing_fallback"
-            logger.info(
-                "embedding_fallback_loaded",
-                backend=self.backend_name,
-                dimension=self.dimension,
-            )
+        logger.info(
+            "loading_embedding_model",
+            provider=self.provider,
+            model_name=model_name,
+            api_url=nvidia_api_url,
+        )
+        self.model = _NVIDIAAPIEmbedder(
+            api_url=nvidia_api_url,
+            api_key=nvidia_api_key,
+            model_name=model_name,
+            truncate=nvidia_truncate,
+            timeout_seconds=request_timeout_seconds,
+            max_batch_size=nvidia_max_batch_size,
+        )
+        probe = self.model.encode(["embedding_dimension_probe"])
+        self.dimension = int(probe.shape[1])
+        self.backend_name = "nvidia_api"
+
+        logger.info(
+            "embedding_model_loaded",
+            backend=self.backend_name,
+            provider=self.provider,
+            model_name=model_name,
+            dimension=self.dimension,
+        )
 
     @staticmethod
     def _normalize_rows(vectors: np.ndarray) -> np.ndarray:
@@ -227,10 +171,7 @@ class EmbeddingService:
 
         cache = self.cache_service
         if cache is None:
-            if self.backend_name == "sentence_transformer":
-                embeddings = self.model.encode(safe_texts, convert_to_numpy=True, show_progress_bar=False)
-            else:
-                embeddings = self.model.encode(safe_texts)
+            embeddings = self.model.encode(safe_texts)
             vectors = embeddings.astype(np.float32)
             return self._normalize_rows(vectors)
 
@@ -256,10 +197,7 @@ class EmbeddingService:
             miss_keys.append(key)
 
         if misses:
-            if self.backend_name == "sentence_transformer":
-                uncached = self.model.encode(misses, convert_to_numpy=True, show_progress_bar=False)
-            else:
-                uncached = self.model.encode(misses)
+            uncached = self.model.encode(misses)
 
             normalized_uncached = self._normalize_rows(uncached.astype(np.float32))
             for offset, row_idx in enumerate(miss_indices):
